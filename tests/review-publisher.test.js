@@ -169,3 +169,19 @@ test('formatFinalReviewBody preserves severity and detail for unresolved finding
   assert.match(body, /判定根拠: 失敗を隠すと利用者は処理成功と誤認する/);
   assert.match(body, /保存処理の戻り値を確認し、失敗時は呼び出し元へエラーを返す。/);
 });
+
+test('buildFinalReviewBody appends the result marker after the summary', () => {
+  const { buildFinalReviewBody } = require('../scripts/review-publisher');
+  const crypto = require('crypto');
+  const artifact = Buffer.from('{"pr":7}');
+  const sha = crypto.createHash('sha256').update(artifact).digest('hex');
+  const marker = `<!-- gh-maestro:review-manager-result:v1:pr=7:sha256=${sha} -->`;
+  const body = buildFinalReviewBody({ posted: [], unresolved: [], rejected: [] }, marker);
+  assert.equal(body, `Review Manager completed.\nPosted inline findings: 0\nUnposted findings (anchor unresolved): 0\nRejected malformed findings: 0\n\n3観点とも機械的な指摘なし。\n\n${marker}`);
+});
+
+test('buildFinalReviewBody without a marker keeps the previous body unchanged', () => {
+  const { buildFinalReviewBody, formatFinalReviewBody } = require('../scripts/review-publisher');
+  const result = { posted: [], unresolved: [], rejected: [] };
+  assert.equal(buildFinalReviewBody(result), formatFinalReviewBody(result));
+});

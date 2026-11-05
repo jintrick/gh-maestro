@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./shared/child-process');
-const { readJsonFile } = require('./shared/json-file');
+const { parseJsonText } = require('./shared/json-file');
+const { reviewResultMarker } = require('./shared/review-result-marker');
 
 const USAGE = `review-publisher.js — RM finding JSONを検証し、PRレビューとして投稿する
 
@@ -289,11 +291,18 @@ function processFindings(payload, options = {}) {
   };
 }
 
+// 最終レビュー本文は、インライン指摘をすべて投稿した後にだけ投稿される。
+// resultMarker を渡したときは末尾に掲載の印を付ける（finalize-issue.js が掲載を照合する）。
+function buildFinalReviewBody(result, resultMarker) {
+  const body = formatFinalReviewBody(result);
+  return resultMarker ? `${body}\n\n${resultMarker}` : body;
+}
+
 function publish(payload, options = {}) {
   const result = processFindings(payload, options);
   if (!options.dryRun) {
     for (const finding of result.posted) postInlineComment(payload, finding);
-    postFinalReview(payload, formatFinalReviewBody(result));
+    postFinalReview(payload, buildFinalReviewBody(result, options.resultMarker));
   }
   return result;
 }
@@ -308,6 +317,7 @@ module.exports = {
   formatFindingBody,
   formatUnresolvedFinding,
   formatFinalReviewBody,
+  buildFinalReviewBody,
   processFindings,
   publish,
 };
@@ -325,8 +335,14 @@ if (require.main === module) {
     process.exit(1);
   }
   try {
-    const payload = readJsonFile(path.resolve(file));
-    const result = publish(payload, { dryRun });
+    // 掲載の印は読んだバイト列そのものから作る（JSON解析後の値から作り直さない）。
+    const artifactPath = path.resolve(file);
+    const artifactBytes = fs.readFileSync(artifactPath);
+    const payload = parseJsonText(artifactBytes.toString('utf8'));
+    const result = publish(payload, {
+      dryRun,
+      resultMarker: reviewResultMarker(payload && payload.pr, artifactBytes),
+    });
     if (dryRun) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (e) {
     console.error(`review-publisher: ${e.message}`);

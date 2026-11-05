@@ -13,7 +13,7 @@
 
 const path = require('path');
 const crypto = require('crypto');
-const { readFileSync, existsSync, rmSync } = require('fs');
+const { readFileSync, existsSync, rmSync, statSync } = require('fs');
 const childProcess = require('./shared/child-process');
 const { spawnSync } = childProcess;
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
@@ -24,6 +24,7 @@ const { readWorkersRaw } = require('./shared/workers-registry');
 const { clearPrMonitorTarget } = require('./shared/pr-monitor-target');
 const { toWinPath } = require('./shared/win-path');
 const { resolveRepo } = require('./shared/repo');
+const { reviewResultMarker } = require('./shared/review-result-marker');
 const { commentIssueBody } = require('./comment-issue');
 
 const USAGE = `finalize-issue.js — Issue をクローズし、そのIssueの全ワーカーを削除する
@@ -52,8 +53,13 @@ worker worktree ごとの終了に失敗した場合は、そのworkerを削除�
 - このIssueに紐づくPRの .gh-maestro/review-manager-<PR>.incomplete を削除
   （PR発見は gh pr list --search head:issue-<N> --state all → 本文 "#<N>" フォールバック）
 - .gh-maestro/executions.json の当該Issueレコードを間引き（ファイル自体は残す）
+- 対象PRの records/pr/<PR>/review/manager.json（レビュー結果）は、PRのレビュー本文に
+  掲載の印（manager.json のSHA-256を含む）が認証ユーザーの投稿として存在することを確かめられた場合だけ削除する。
+  確かめられない場合（未掲載・印の無い旧形式・照合失敗・PR特定失敗）は残し、理由を出す
 
 Output (stdout):
+  REVIEW_ARTIFACT_REMOVED:pr=<PR>                 manager.json を削除した（掲載を確認済み）
+  REVIEW_ARTIFACT_KEPT:pr=<PR|?> reason=<理由>    manager.json を残した（人間が理由を確認する）
   FINALIZED:<N> removed=<削除成功数>/<対象数> closed=<true|false>`;
 
 /**
@@ -147,52 +153,97 @@ function runGhApiRead(spawnFn, args, workspace, purpose) {
   return String(result.stdout || '');
 }
 
-function defaultReadIssueComments({ issue, repo, workspace }, deps = {}) {
-  const resolveRepoFn = deps.resolveRepoFn || resolveRepo;
-  const resolvedRepo = resolveRepoFn({ repo, workspace }, deps.repoDeps || {});
-  if (!resolvedRepo || !resolvedRepo.ok || !resolvedRepo.repo) {
-    throw new Error(`Issueコメントの照合に使うリポジトリを解決できません: ${resolvedRepo && resolvedRepo.error || 'unknown'}`);
-  }
-
-  const spawnFn = deps.spawnSyncFn || spawnSync;
+// 認証ユーザーの login を取得する（照合の基準。取得できなければ例外）。
+// 決定事項コメントの照合とレビュー掲載の照合の両方が共用する。
+function readAuthenticatedLogin(spawnFn, workspace) {
   const authOutput = runGhApiRead(spawnFn, ['api', 'user', '--jq', '.login'], workspace, 'GitHub認証ユーザーの取得に失敗しました');
   const authLines = authOutput.trim().split(/\r?\n/);
   const authenticatedLogin = authLines.length === 1 ? authLines[0] : '';
   if (!isGitHubLogin(authenticatedLogin)) {
-    throw new Error('GitHub認証ユーザーを取得できないため、決定事項の投稿を安全に照合できません');
+    throw new Error('GitHub認証ユーザーを取得できないため、投稿を安全に照合できません');
   }
+  return authenticatedLogin;
+}
 
-  const endpoint = `repos/${resolvedRepo.repo}/issues/${issue}/comments`;
+// 一覧エンドポイント（Issueコメント・PRレビュー等）の { login, body } を全件読む。
+// 1件でも解釈できなければ例外（照合の見落としにしない）。
+function readPagedLoginBodies(spawnFn, endpoint, workspace, failurePurpose) {
   const commentOutput = runGhApiRead(
     spawnFn,
     ['api', '--paginate', endpoint, '--jq', '.[] | {login: .user.login, body: .body} | @json | @base64'],
     workspace,
-    'Issueコメントの照合に失敗しました',
+    failurePurpose,
   );
   const lines = commentOutput.split(/\r?\n/).filter((line) => line.trim() !== '');
-  const comments = lines.map((line, index) => {
+  return lines.map((line, index) => {
     let encoded = line;
     try {
       const parsedLine = JSON.parse(line);
       if (typeof parsedLine === 'string') encoded = parsedLine;
     } catch { /* gh --jq may emit a scalar either raw or JSON-quoted */ }
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
-      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目が不正なBase64です`);
+      throw new Error(`${failurePurpose}: 照合結果 ${index + 1} 件目が不正なBase64です`);
     }
     let comment;
     try {
       comment = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
     } catch (error) {
-      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目をJSONとして読めません: ${error.message}`);
+      throw new Error(`${failurePurpose}: 照合結果 ${index + 1} 件目をJSONとして読めません: ${error.message}`);
     }
     if (!comment || typeof comment !== 'object' || Array.isArray(comment)
       || typeof comment.body !== 'string') {
-      throw new Error(`Issueコメントの照合結果 ${index + 1} 件目から本文を取得できません`);
+      throw new Error(`${failurePurpose}: 照合結果 ${index + 1} 件目から本文を取得できません`);
     }
     return { login: comment.login, body: comment.body };
   });
+}
 
+function resolveRepoOrThrow(repo, workspace, deps = {}) {
+  const resolveRepoFn = deps.resolveRepoFn || resolveRepo;
+  const resolvedRepo = resolveRepoFn({ repo, workspace }, deps.repoDeps || {});
+  if (!resolvedRepo || !resolvedRepo.ok || !resolvedRepo.repo) {
+    throw new Error(`照合に使うリポジトリを解決できません: ${resolvedRepo && resolvedRepo.error || 'unknown'}`);
+  }
+  return resolvedRepo.repo;
+}
+
+function defaultReadIssueComments({ issue, repo, workspace }, deps = {}) {
+  const resolvedRepo = resolveRepoOrThrow(repo, workspace, deps);
+  const spawnFn = deps.spawnSyncFn || spawnSync;
+  const authenticatedLogin = readAuthenticatedLogin(spawnFn, workspace);
+  const comments = readPagedLoginBodies(
+    spawnFn,
+    `repos/${resolvedRepo}/issues/${issue}/comments`,
+    workspace,
+    'Issueコメントの照合に失敗しました',
+  );
   return { authenticatedLogin, comments };
+}
+
+/**
+ * PRのレビュー本文に掲載の印（reviewResultMarker）が、認証ユーザーの投稿として存在するかを確かめる。
+ * 照合できないときは例外を投げる（呼び出し側は「掲載を確かめられない」として manager.json を残す）。
+ * @param {{pr: number|string, repo: string|null, workspace: string, marker: string}} params
+ * @param {{resolveRepoFn?: Function, repoDeps?: object, spawnSyncFn?: Function}} [deps]
+ * @returns {{posted: boolean}}
+ */
+function defaultFindReviewResultPosted({ pr, repo, workspace, marker }, deps = {}) {
+  const resolvedRepo = resolveRepoOrThrow(repo, workspace, deps);
+  const spawnFn = deps.spawnSyncFn || spawnSync;
+  const authenticatedLogin = readAuthenticatedLogin(spawnFn, workspace).toLowerCase();
+  const reviews = readPagedLoginBodies(
+    spawnFn,
+    `repos/${resolvedRepo}/pulls/${pr}/reviews`,
+    workspace,
+    'PRレビューの照合に失敗しました',
+  );
+  return {
+    posted: reviews.some((review) => (
+      typeof review.login === 'string'
+      && review.login.toLowerCase() === authenticatedLogin
+      && review.body.includes(marker)
+    )),
+  };
 }
 
 function defaultFindDecisionPosted({ issue, repo, workspace, decisionBody }, deps = {}) {
@@ -223,7 +274,8 @@ function defaultFindDecisionPosted({ issue, repo, workspace, decisionBody }, dep
 //    bodyReferencesIssue 参照。GitHub全文検索のあいまい一致は使わない——生の数字だけで検索すると
 //    無関係PRの本文中のバージョン番号等に誤マッチしうる）
 // --state all でクローズ済みPRも含めて発見する（.incomplete 後始末はクローズ後でも行いたい）。
-// gh が失敗したら空配列を返す（best-effort。削除漏れは許容し、後続のクローズを阻害しない）。
+// 一覧を得られなかった（gh失敗・出力が解釈できない）ときは例外を投げる。空配列は「該当PRが無い」
+// という確定した事実だけに使い、検索の失敗を0件と取り違えない（manager.json の残存理由を正しく出すため）。
 function defaultFindReviewPrs(issue, repo, workspace) {
   const prArgs = ['pr', 'list', '--search', `head:issue-${issue}`, '--state', 'all', '--json', 'number'];
   if (repo) prArgs.unshift('--repo', repo);
@@ -240,34 +292,97 @@ function defaultFindReviewPrs(issue, repo, workspace) {
   const bodyArgs = ['pr', 'list', '--state', 'all', '--json', 'number,body'];
   if (repo) bodyArgs.unshift('--repo', repo);
   const bodyResult = spawnSync('gh', bodyArgs, { cwd: workspace, encoding: 'utf8' });
-  if (bodyResult.status !== 0) return [];
-  try {
-    const all = JSON.parse(bodyResult.stdout || '[]');
-    if (!Array.isArray(all)) return [];
-    return all
-      .filter((p) => bodyReferencesIssue(p.body, issue))
-      .map((p) => p.number)
-      .filter((n) => n != null);
-  } catch {
-    return [];
+  if (bodyResult.status !== 0) {
+    throw new Error(`本文参照のPR一覧を取得できません: ${(bodyResult.stderr || '').trim() || `gh exit ${bodyResult.status}`}`);
   }
+  let all;
+  try {
+    all = JSON.parse(bodyResult.stdout || '[]');
+  } catch (error) {
+    throw new Error(`本文参照のPR一覧を解釈できません: ${error.message}`);
+  }
+  if (!Array.isArray(all)) {
+    throw new Error('本文参照のPR一覧の形式が不正です');
+  }
+  return all
+    .filter((p) => bodyReferencesIssue(p.body, issue))
+    .map((p) => p.number)
+    .filter((n) => n != null);
 }
 
 /**
- * Issue ライフサイクル終了時の、情報価値のない内部状態の後始末（best-effort）。
- * 価値ある記録（records/pr/<PR>/review/manager.json 等）は対象にしない（受理基準c）。
+ * PR の manager.json（レビュー結果）を、掲載済みであることを確かめられたときだけ破棄する。
+ * 掲載の印（reviewResultMarker）は manager.json のバイト列から作るため、ファイルが書き換わっていれば一致しない。
+ * 確かめられない（未掲載・照合失敗・読み取り失敗・削除失敗）ときは残し、理由を返す（ADR 0059）。
+ * @returns {{pr: number|string, action: 'none'|'removed'|'kept', reason?: string}}
+ */
+function cleanupReviewArtifact({ workspace, pr, repo, findReviewResultPostedFn }) {
+  let artifactPath;
+  try {
+    artifactPath = reviewArtifactPath(workspace, pr, '.json');
+  } catch (e) {
+    return { pr, action: 'kept', reason: `不正なPR番号のため manager.json を特定できません: ${e.message}` };
+  }
+  let stat;
+  try {
+    stat = statSync(artifactPath);
+  } catch (e) {
+    if (e.code === 'ENOENT') return { pr, action: 'none' };
+    return { pr, action: 'kept', reason: `manager.json の状態を確認できません: ${e.message}` };
+  }
+  if (!stat.isFile()) {
+    return { pr, action: 'kept', reason: 'manager.json が通常ファイルではありません' };
+  }
+
+  let bytes;
+  try {
+    bytes = readFileSync(artifactPath);
+  } catch (e) {
+    return { pr, action: 'kept', reason: `manager.json を読めません: ${e.message}` };
+  }
+  const marker = reviewResultMarker(pr, bytes);
+
+  let posted;
+  try {
+    posted = findReviewResultPostedFn({ pr, repo, workspace, marker });
+    if (!posted || typeof posted.posted !== 'boolean') {
+      throw new Error('照合関数が posted の真偽値を返しませんでした');
+    }
+  } catch (e) {
+    return { pr, action: 'kept', reason: `掲載を照合できません: ${e.message}` };
+  }
+  if (!posted.posted) {
+    return { pr, action: 'kept', reason: '掲載の印が PR のレビューに見つかりません（未掲載、または印の無い旧形式）' };
+  }
+
+  try {
+    rmSync(artifactPath);
+  } catch (e) {
+    return { pr, action: 'kept', reason: `削除に失敗しました: ${e.message}` };
+  }
+  return { pr, action: 'removed' };
+}
+
+/**
+ * Issue ライフサイクル終了時の後始末（best-effort）。
  *
  * - assistant-watch/<issue>.json を削除（Issue #248 項目2）
  * - 対象PRの review-manager-<PR>.incomplete を削除（項目4・終端削除）
+ * - 対象PRの records/pr/<PR>/review/manager.json を、PRへの掲載を確かめられたときだけ削除（ADR 0059）。
+ *   確かめられない場合は残し、reviewArtifacts に理由を記録する
  * - executions.json の当該issueレコードを間引き（項目7）
  *
  * @param {string} workspace
  * @param {string|number} issue
- * @param {{repo?: string|null, findReviewPrsFn?: Function}} [opts]
- * @returns {{watchRemoved: boolean, incompleteRemoved: number[], executionsPruned: number}}
+ * @param {{repo?: string|null, findReviewPrsFn?: Function, findReviewResultPostedFn?: Function}} [opts]
+ * @returns {{watchRemoved: boolean, incompleteRemoved: number[], executionsPruned: number, reviewArtifacts: {pr: number|string|null, action: 'removed'|'kept', reason?: string}[]}}
  */
-function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn = defaultFindReviewPrs } = {}) {
-  const result = { watchRemoved: false, incompleteRemoved: [], executionsPruned: 0 };
+function cleanupIssueArtifacts(workspace, issue, {
+  repo = null,
+  findReviewPrsFn = defaultFindReviewPrs,
+  findReviewResultPostedFn = defaultFindReviewResultPosted,
+} = {}) {
+  const result = { watchRemoved: false, incompleteRemoved: [], executionsPruned: 0, reviewArtifacts: [] };
 
   // item2: assistant-watch/<issue>.json 削除。issue はファイル名に使うため正整数検証してから
   // パス構築する（path-confinement ルール）。
@@ -287,10 +402,17 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
 
   // item4: 対象PRの .incomplete 削除。reviewArtifactPath が PR の正整数検証 + workspace封じ込めを担う。
   let prs = [];
+  let prDetectionFailed = false;
   try {
     prs = findReviewPrsFn(issue, repo, workspace) || [];
   } catch (e) {
+    prDetectionFailed = true;
     process.stderr.write(`finalize-issue: 対象PRの検出に失敗しました（続行します）: ${e.message}\n`);
+    result.reviewArtifacts.push({
+      pr: null,
+      action: 'kept',
+      reason: `Issueに紐づくPRを特定できないため manager.json を確認できません: ${e.message}`,
+    });
   }
   for (const pr of prs) {
     let sentinel;
@@ -307,6 +429,15 @@ function cleanupIssueArtifacts(workspace, issue, { repo = null, findReviewPrsFn 
       }
     } catch (e) {
       process.stderr.write(`finalize-issue: review-manager-${pr}.incomplete の削除に失敗しました（続行します）: ${e.message}\n`);
+    }
+  }
+
+  // manager.json（レビュー結果）は、PRへの掲載を確かめられたときだけ破棄する（ADR 0059）。
+  // 検出に失敗した場合は、対象PRが分からないため確かめられない（上で kept を記録済み）。
+  if (!prDetectionFailed) {
+    for (const pr of prs) {
+      const outcome = cleanupReviewArtifact({ workspace, pr, repo, findReviewResultPostedFn });
+      if (outcome.action !== 'none') result.reviewArtifacts.push(outcome);
     }
   }
 
@@ -460,6 +591,7 @@ function finalizeIssue({ workspace, issue, repo = null, decisionBody }, deps = {
   const artifacts = cleanupIssueArtifacts(workspace, issue, {
     repo,
     findReviewPrsFn: deps.findReviewPrsFn || defaultFindReviewPrs,
+    findReviewResultPostedFn: deps.findReviewResultPostedFn || defaultFindReviewResultPosted,
   });
 
   return {
@@ -476,10 +608,26 @@ function finalizeIssue({ workspace, issue, repo = null, decisionBody }, deps = {
   };
 }
 
+/**
+ * manager.json の後始末結果を、stdout の機械可読な行に整形する。
+ * @param {{pr: number|string|null, action: 'removed'|'kept', reason?: string}[]} reviewArtifacts
+ * @returns {string[]}
+ */
+function formatReviewArtifactLines(reviewArtifacts) {
+  return (reviewArtifacts || []).map((entry) => {
+    const pr = entry.pr === null || entry.pr === undefined ? '?' : entry.pr;
+    if (entry.action === 'removed') return `REVIEW_ARTIFACT_REMOVED:pr=${pr}`;
+    const reason = String(entry.reason || 'unknown').replace(/\s+/g, ' ').trim();
+    return `REVIEW_ARTIFACT_KEPT:pr=${pr} reason=${reason}`;
+  });
+}
+
 module.exports = {
   collectWorkersForIssue,
   finalizeIssue,
   cleanupIssueArtifacts,
+  formatReviewArtifactLines,
+  defaultFindReviewResultPosted,
   bodyReferencesIssue,
   decisionCommentMarker,
   decisionCommentBody,
@@ -544,6 +692,9 @@ if (require.main === module) {
   }
 
   const result = finalizeIssue({ workspace, issue, repo, decisionBody });
+  if (result.artifacts) {
+    for (const line of formatReviewArtifactLines(result.artifacts.reviewArtifacts)) console.log(line);
+  }
   console.log(`FINALIZED:${issue} removed=${result.removedCount}/${result.workers.length} closed=${result.closed}`);
   process.exit(result.closed ? 0 : 1);
 }
