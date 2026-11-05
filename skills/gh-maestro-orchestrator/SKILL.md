@@ -244,7 +244,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 | RESIDENT_NOTIFICATION（source=worker-supervisor、Review Managerの状態判定不能） | PR番号と判定不能の理由を保持し、manager.runningと関連記録を削除・修復せずmonitor-recovery.mdに従う。判定できない間は再開しない。 | 工程7-[2/6] |
 | Review Manager異常終了のNEW_MESSAGE（fromがissue-<N>-review-manager-pr-<PR>） | worker logで原因を確認し、原因解消後にReview Managerだけ復旧する。復旧を進めるために人間の判断が必要な場合だけ、その判断に要る状況を示して尋ねる。 | 工程7-[2/6] |
 | SLOW_TEST_STARTED / SLOW_TEST_ALREADY_RECORDED / SLOW_TEST_RESULT | PR/HEAD/layerを照合し、状態・件数・ログ識別子を記録する。unavailableや申告更新失敗を再試行・診断しない。軽量PRでは発生しない。 | 工程7-[1/6] |
-| REVIEW_COMMENT / PR_REVIEW | 投稿者と本文を保持する。APPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENT同様に扱う。 | triage.mdと工程7-[3/6]。 |
+| REVIEW_COMMENT / PR_REVIEW | 投稿者と本文を保持する。APPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENT同様に扱う。Review Managerのレビュー（本文が `Review Manager completed.` で始まるもの）の指摘は、通知本文ではなく `node "{{SCRIPTS_PATH}}/read-review-findings.js" --pr <PR> --workspace $WORKSPACE` の全文を入力にしてトリアージする（終了コード2・3は「指摘なし」ではない。ADR 0059）。 | triage.mdと工程7-[3/6]。 |
 | PR_COMMENT | 投稿者と本文を保持する。テスト結果申告など、正式レビューではないコメントではtriage.mdを追加しない。 | 工程7-[1/6]。 |
 | PR_PUSH:<sha> | 新HEADへslowを予約しCI checksを照会する。修正pushごとに、Review Managerで再レビューする・explorerで事実確認する・どちらもしない、のどれかをorchestratorが判断して選ぶ。 | 工程7-[4/6]。 |
 | TEST_STATUS:<state>:<declaredSha>:<headSha>:<provenance>:<scope>:lint=<lintState>:typecheck=<typecheckState> | 状態をそのまま記録する。STALE/NONEはquery-test-status.jsで正本を確認する。機械的停止条件にしない。 | 工程7-[5/6] |

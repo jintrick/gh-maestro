@@ -31,7 +31,7 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 ### Review Manager停止通知
 
-`RESIDENT_NOTIFICATION` の `source` が `worker-supervisor` で、本文にReview ManagerとPR番号がある場合は停止検知の通知である。PR単位の `records/pr/<PR>/review/manager.running`、`manager.log`、`manager.json`、`manager.incomplete` を確認し、必要なら `worker-status.js list --workspace "$WORKSPACE"` で現在のReview Managerの生存状態を照合する。
+`RESIDENT_NOTIFICATION` の `source` が `worker-supervisor` で、本文にReview ManagerとPR番号がある場合は停止検知の通知である。PR単位の `<workspace>/.gh-maestro/records/pr/<PR>/review/` 配下の `manager.running`、`manager.log`、`manager.json`、`manager.incomplete` を確認し、必要なら `worker-status.js list --workspace "$WORKSPACE"` で現在のReview Managerの生存状態を照合する。
 
 停止通知は、結果artifactと終了フックの `abnormal-exit` markerを確認できなかった停止を示す。`manager.json` または `manager.incomplete` があれば成果を確認し、`manager.log` で停止理由を調べる。原因と継続対象を確認できた場合だけ、上記の `start-review-manager.js --resume` を明示して再開する。通知を契機に自動再起動・プロセス停止・記録削除をしない。
 
@@ -57,7 +57,7 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 ## Issue終了時
 
-反省会後、決定事項本文を `/tmp/decision-<N>.md` に作り、`finalize-issue.js --issue <N> --workspace $WORKSPACE --decision-file /tmp/decision-<N>.md` を1回実行する。finalize-issue.jsは決定事項コメントをIssueへ投稿してからtarget等を後始末するため、投稿失敗時はクローズしない。`finalize-issue.js` は一致するtargetだけを削除し、plugin monitorが次の周回でpoll-prを停止できる状態にする。`reset-session.js` はセッション全体を初期化するためtargetを無条件に削除する。
+反省会後、決定事項本文を `/tmp/decision-<N>.md` に作り、`finalize-issue.js --issue <N> --workspace $WORKSPACE --decision-file /tmp/decision-<N>.md` を1回実行する。出力に `REVIEW_ARTIFACT_KEPT:pr=<PR> reason=<理由>` が出たら、manager.json は掲載を確かめられず残っている。理由を人間に示し、自動で消し直さない。finalize-issue.jsは決定事項コメントをIssueへ投稿してからtarget等を後始末するため、投稿失敗時はクローズしない。`finalize-issue.js` は一致するtargetだけを削除し、plugin monitorが次の周回でpoll-prを停止できる状態にする。`reset-session.js` はセッション全体を初期化するためtargetを無条件に削除する。
 
 ## ワーカー状態監視と異常対応
 

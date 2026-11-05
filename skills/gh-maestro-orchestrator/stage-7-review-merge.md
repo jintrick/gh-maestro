@@ -40,6 +40,14 @@ plugin monitorまたはその子 `poll-pr.js` が落ちた場合の確認・targ
 
 Review Manager の findings が1件以上あるときだけ行う。0件のPRではトリアージは発生せず、7-[5/6]の提示で `工程7-[3/6]（任意）をスキップ` とだけ名乗る。
 
+指摘の全文は通知本文ではなく、次のコマンドの出力を入力にする（通知本文は途中で切れうる）。
+
+```sh
+node "{{SCRIPTS_PATH}}/read-review-findings.js" --pr <PR> --workspace $WORKSPACE
+```
+
+終了コード2（manager.json が無い）と3（壊れている）は「指摘なし」ではない。原因を確認して人間に示し、0件と読み替えない。出力が指摘0件のときだけスキップする。
+
 PRに新しいレビューコメントが届くたびに、orchestratorは指摘を評価するところまでを行う。`{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/triage.md` を開き、そこに従って実害度スコア／対応コストの付与・人間への提示・回答に従った実行を行う。提示は `工程7-[3/6]` と名乗り、「人間への発言の規範」に従う。**実際にコーダーに修正依頼する／無視する／保留Issueに積むという実行アクションは、観点やスコアの値に関わらず、必ず人間の明示的な決定を経てから行う。** 観点・実害度・対応コストがどうであれ、人間の確認を省略してよい経路は存在しない。同じBLOCKERが2回連続して届くスパイラルの提示もここで行う。
 
 回答に従って修正を依頼したら7-[1/6]の監視へ戻る。修正pushが届いたら7-[4/6]で再レビュー・事実確認・どちらもしない、のどれかを選び、その後7-[5/6]へ進む。
@@ -60,7 +68,7 @@ PRに新しいレビューコメントが届くたびに、orchestratorは指摘
 
 再レビューで新しい指摘が続き終わらない場合は、7-[3/6]の「同じBLOCKERが2回連続して届いたら人間に尋ねる」規則で止める。Review Managerや監視スクリプトは自分で再レビューを始めない。
 
-**(a)の手順**: 前回のレビュー結果（`records/pr/<PR>/review/manager.json`）の `pr`・`repo`・`headRefOid`・`findings` を写したファイルを作り、各指摘に7-[3/6]で決めた扱い `disposition`（`fixed`／`ignored`／`deferred`）を足す（形式は `start-review-manager.js --help`）。前回のReview Managerが終了していることを確認して実行する。`poll-pr.js` の起動claimは触らない。途中経過から再開するときだけ `--resume` を付ける。結果は通常と同じく `PR_REVIEW` で届き、7-[3/6]で扱う。渡した内容は判定に使うデータであり、観点やレビュー範囲を絞る目的では使わない。
+**(a)の手順**: 前回のレビュー結果（`<workspace>/.gh-maestro/records/pr/<PR>/review/manager.json`。`node "{{SCRIPTS_PATH}}/read-review-findings.js" --pr <PR> --workspace $WORKSPACE --json` の出力と同じ内容）の `pr`・`repo`・`headRefOid`・`findings` を写したファイルを作り、各指摘に7-[3/6]で決めた扱い `disposition`（`fixed`／`ignored`／`deferred`）を足す（形式は `start-review-manager.js --help`）。前回のReview Managerが終了していることを確認して実行する。`poll-pr.js` の起動claimは触らない。途中経過から再開するときだけ `--resume` を付ける。結果は通常と同じく `PR_REVIEW` で届き、7-[3/6]で扱う。渡した内容は判定に使うデータであり、観点やレビュー範囲を絞る目的では使わない。
 
 ```sh
 node "{{SCRIPTS_PATH}}/start-review-manager.js" --prior-findings-file <前回の指摘ファイル> <PR> $REPO $WORKSPACE <ISSUE>
@@ -76,7 +84,7 @@ node "{{SCRIPTS_PATH}}/start-review-manager.js" --prior-findings-file <前回の
 
 `REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけである。提示は `工程7-[5/6]` と名乗り、Review Managerのレビュー結果、テスト申告、CI checksを判断材料として示す。7-[3/6]を実施した場合はtriage結果も示し、該当する場合はPRのbase違いと結果を取得できなかった項目も示す。マージ判断の問いは「人間への発言の規範」に従う。修正pushがあった場合は、pushごとに7-[4/6]で選んだもの（再レビュー・事実確認・どちらもしない）と理由を1行ずつ示す。
 
-- Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `records/pr/<PR>/review/manager.json` 生成）
+- Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `<workspace>/.gh-maestro/records/pr/<PR>/review/manager.json` 生成）
 - 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認、または再レビューが完了するまで未解消として扱う）
 - **テスト申告状態の確認と事実提示（Issue #209）**:
   - `node "{{SCRIPTS_PATH}}/query-test-status.js" --pr <PR>` を実行し、成功時に返るJSON 1行をテスト申告状態の正本として確認する。このコマンドは現在のPRコメントとHEADをGitHubから取得するため、`poll-reviews.js` の内部状態ファイルや「新しいコメントがあるか」の推測を使わない。

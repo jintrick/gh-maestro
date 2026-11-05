@@ -105,7 +105,7 @@ PR の差分を読み、8つの葉それぞれを「今回は見る／見ない�
 ```
 <ワークスペース>/.gh-maestro/records/pr/<PR番号>/review/
 ├── manifest.json          どの観点を採用したか、どう分割したか
-├── manager.json           最終的な指摘の一覧
+├── manager.json           最終的な指摘の一覧（PRへの掲載を確かめてから Issue クローズ時に破棄する。ADR 0059）
 └── manager.retries.json   やり直した回数
 ```
 
