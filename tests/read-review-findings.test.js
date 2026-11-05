@@ -188,3 +188,27 @@ test('CLI rejects a non-positive --pr value before reading any file', () => {
   assert.equal(result.status, 1, result.stdout);
   assert.match(result.stderr, /--pr は正の整数/);
 });
+
+test('CLI text output (no --json) exits 0 and prints each finding body and every verified reference in full', () => {
+  // 期待値はこのテスト内の独立した文字列リテラル。実装の整形関数からは導出しない。
+  const longBody = '第1段落: 入力が空のとき配列の先頭要素を参照して例外になる。'
+    + '第2段落: 呼び出し元は例外を捕捉せず、通知本文の切れた位置で結果が途切れる。'
+    + '第3段落（末尾）: 修正は空判定を先に行うこと。';
+  const references = ['scripts/alpha.js:12', 'scripts/beta.js:87', 'tests/gamma.test.js:203'];
+  withWorkspace((dir) => {
+    writeManagerJson(dir, JSON.stringify(validPayload([
+      validFinding({
+        summary: '空入力で例外になる',
+        body: longBody,
+        verified_references: references,
+      }),
+    ])));
+    const result = spawnSync(process.execPath, [SCRIPT, '--pr', '7', '--workspace', dir], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes(longBody), 'the whole body must be printed without truncation');
+    for (const reference of references) {
+      assert.ok(result.stdout.includes(reference), `reference missing from output: ${reference}`);
+    }
+    assert.ok(result.stdout.includes('- 指摘件数: 1'));
+  });
+});

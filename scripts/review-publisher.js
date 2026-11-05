@@ -301,10 +301,23 @@ function buildFinalReviewBody(result, resultMarker) {
 function publish(payload, options = {}) {
   const result = processFindings(payload, options);
   if (!options.dryRun) {
-    for (const finding of result.posted) postInlineComment(payload, finding);
-    postFinalReview(payload, buildFinalReviewBody(result, options.resultMarker));
+    const postInline = options.postInlineReviewFn || postInlineComment;
+    const postFinal = options.postFinalReviewFn || postFinalReview;
+    for (const finding of result.posted) postInline(payload, finding);
+    postFinal(payload, buildFinalReviewBody(result, options.resultMarker));
   }
   return result;
+}
+
+// 成果物ファイル（manager.json）を読んで投稿する。掲載の印はファイルのバイト列そのものから作る
+// （JSON解析後に再直列化した値から作らない）。CLIはこの関数だけを呼ぶ。
+function publishArtifactFile(artifactFile, options = {}) {
+  const artifactBytes = fs.readFileSync(path.resolve(artifactFile));
+  const payload = parseJsonText(artifactBytes.toString('utf8'));
+  return publish(payload, {
+    ...options,
+    resultMarker: reviewResultMarker(payload && payload.pr, artifactBytes),
+  });
 }
 
 module.exports = {
@@ -320,6 +333,7 @@ module.exports = {
   buildFinalReviewBody,
   processFindings,
   publish,
+  publishArtifactFile,
 };
 
 if (require.main === module) {
@@ -335,14 +349,7 @@ if (require.main === module) {
     process.exit(1);
   }
   try {
-    // 掲載の印は読んだバイト列そのものから作る（JSON解析後の値から作り直さない）。
-    const artifactPath = path.resolve(file);
-    const artifactBytes = fs.readFileSync(artifactPath);
-    const payload = parseJsonText(artifactBytes.toString('utf8'));
-    const result = publish(payload, {
-      dryRun,
-      resultMarker: reviewResultMarker(payload && payload.pr, artifactBytes),
-    });
+    const result = publishArtifactFile(file, { dryRun });
     if (dryRun) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (e) {
     console.error(`review-publisher: ${e.message}`);

@@ -276,22 +276,31 @@ function defaultFindDecisionPosted({ issue, repo, workspace, decisionBody }, dep
 // --state all でクローズ済みPRも含めて発見する（.incomplete 後始末はクローズ後でも行いたい）。
 // 一覧を得られなかった（gh失敗・出力が解釈できない）ときは例外を投げる。空配列は「該当PRが無い」
 // という確定した事実だけに使い、検索の失敗を0件と取り違えない（manager.json の残存理由を正しく出すため）。
-function defaultFindReviewPrs(issue, repo, workspace) {
+function defaultFindReviewPrs(issue, repo, workspace, spawnFn = spawnSync) {
+  // 2つの検索（head と本文）のどちらかが失敗したら例外にする。片方の失敗を、もう片方の
+  // 成功（空配列を含む）で打ち消さない。両方が成功して対象なしのときだけ空配列を返す。
   const prArgs = ['pr', 'list', '--search', `head:issue-${issue}`, '--state', 'all', '--json', 'number'];
   if (repo) prArgs.unshift('--repo', repo);
-  const headResult = spawnSync('gh', prArgs, { cwd: workspace, encoding: 'utf8' });
-  if (headResult.status === 0) {
-    try {
-      const found = JSON.parse(headResult.stdout || '[]');
-      if (Array.isArray(found) && found.length > 0) {
-        return found.map((p) => p.number).filter((n) => n != null);
-      }
-    } catch { /* フォールバックへ */ }
+  const headResult = spawnFn('gh', prArgs, { cwd: workspace, encoding: 'utf8' });
+  if (headResult.status !== 0) {
+    throw new Error(`head:issue-${issue} のPR検索に失敗しました: ${(headResult.stderr || '').trim() || `gh exit ${headResult.status}`}`);
+  }
+  let found;
+  try {
+    found = JSON.parse(headResult.stdout || '[]');
+  } catch (error) {
+    throw new Error(`head:issue-${issue} のPR検索結果を解釈できません: ${error.message}`);
+  }
+  if (!Array.isArray(found)) {
+    throw new Error(`head:issue-${issue} のPR検索結果の形式が不正です`);
+  }
+  if (found.length > 0) {
+    return found.map((p) => p.number).filter((n) => n != null);
   }
 
   const bodyArgs = ['pr', 'list', '--state', 'all', '--json', 'number,body'];
   if (repo) bodyArgs.unshift('--repo', repo);
-  const bodyResult = spawnSync('gh', bodyArgs, { cwd: workspace, encoding: 'utf8' });
+  const bodyResult = spawnFn('gh', bodyArgs, { cwd: workspace, encoding: 'utf8' });
   if (bodyResult.status !== 0) {
     throw new Error(`本文参照のPR一覧を取得できません: ${(bodyResult.stderr || '').trim() || `gh exit ${bodyResult.status}`}`);
   }
@@ -628,6 +637,7 @@ module.exports = {
   cleanupIssueArtifacts,
   formatReviewArtifactLines,
   defaultFindReviewResultPosted,
+  defaultFindReviewPrs,
   bodyReferencesIssue,
   decisionCommentMarker,
   decisionCommentBody,

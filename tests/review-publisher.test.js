@@ -185,3 +185,34 @@ test('buildFinalReviewBody without a marker keeps the previous body unchanged', 
   const result = { posted: [], unresolved: [], rejected: [] };
   assert.equal(buildFinalReviewBody(result), formatFinalReviewBody(result));
 });
+
+test('publishArtifactFile puts the exact marker of the artifact bytes on the final review body', () => {
+  const crypto = require('crypto');
+  const fs = require('fs');
+  const path = require('path');
+  const { publishArtifactFile } = require('../scripts/review-publisher');
+  const { withTempDir } = require('../scripts/shared/temp-directory');
+  withTempDir('gh-maestro-publisher-marker-', (dir) => {
+    // 整形（改行・インデント）込みの既知のバイト列。JSONを再直列化した値の印とは一致しないことも確かめる。
+    const bytes = Buffer.from('{\r\n  "pr": 7,\r\n  "repo": "owner/repo",\r\n  "headRefOid": "abc1234",\r\n  "findings": []\r\n}\r\n', 'utf8');
+    const file = path.join(dir, 'manager.json');
+    fs.writeFileSync(file, bytes);
+    const expectedSha = crypto.createHash('sha256').update(bytes).digest('hex');
+    const reserializedSha = crypto.createHash('sha256').update(JSON.stringify(JSON.parse(bytes.toString('utf8')))).digest('hex');
+    assert.notEqual(expectedSha, reserializedSha, 'fixture must distinguish raw bytes from re-serialized JSON');
+
+    const posted = [];
+    publishArtifactFile(file, {
+      diffText: '',
+      postInlineReviewFn: () => { throw new Error('no inline findings expected'); },
+      postFinalReviewFn: (payload, body) => posted.push({ payload, body }),
+    });
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].payload.pr, 7);
+    assert.equal(
+      posted[0].body,
+      'Review Manager completed.\nPosted inline findings: 0\nUnposted findings (anchor unresolved): 0\nRejected malformed findings: 0\n\n3観点とも機械的な指摘なし。\n\n'
+        + `<!-- gh-maestro:review-manager-result:v1:pr=7:sha256=${expectedSha} -->`,
+    );
+  });
+});
