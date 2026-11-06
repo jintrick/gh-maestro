@@ -66,10 +66,10 @@ $WORKSPACE/.gh-maestro/assistants/issue-$ISSUE/diagram.html
 
 ## 保存と起動
 
-Windowsでは、ファイルを書き出した後に次を実行して既定のブラウザで開く。
+Windowsでは、ファイルを書き出した後、起動時に与えられた `WORKSPACE` と `ISSUE` を実際の値へ置き換えて得た絶対パスを使い、既定のブラウザで開く。次のコードブロックの `$WORKSPACE` / `$ISSUE` は説明用の変数名であり、そのまま実行しない。
 
 ```powershell
-Start-Process -FilePath (Resolve-Path "$WORKSPACE/.gh-maestro/assistants/issue-$ISSUE/diagram.html")
+Start-Process -FilePath (Resolve-Path "<起動時のWORKSPACEの実値>/.gh-maestro/assistants/issue-<起動時のISSUEの実値>/diagram.html")
 ```
 
 `Start-Process` が実行できなかった場合は、HTMLの保存に成功したかを確認し、ブラウザを開けなかったエラーを人間へ伝える。別のブラウザや外部サーバーを勝手に起動して成功扱いにしない。既存の同じIssueの図解は上書きして最新の説明に更新してよいが、別Issueのファイルは変更しない。

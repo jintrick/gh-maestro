@@ -26,15 +26,15 @@ gh issue view $ISSUE --repo $REPO --json title,body -q '[.title, .body] | join("
 
 ## 進行状況の監視
 
-次のコマンドを監視用サブエージェントで実行する。
+Issueの説明直後に一度だけ、`invoke_subagent` で監視用サブエージェントを起動する。サブエージェントへは次のタスクをそのまま渡す。
 
 ```sh
 node "{{SCRIPTS_PATH}}/assistant-watch.js" --issue $ISSUE --workspace $WORKSPACE
 ```
 
-標準出力に `EVENT` 行があれば、JSONの `type` ごとに1文で人間へ伝える。`worker_report` は報告の要旨、`review_done` はレビュー完了、`pr_created` はPR作成、`pr_merged` はマージを伝え、詳細解説を求めるか尋ねる。`hanseikai` は例外で、次節の手順に従い本文を取得して直ちに承認判断に必要な内容を示す。
+標準出力に `EVENT` で始まる行が1行以上出たら、その行を要約・翻訳せず親へ返してタスクを終える。`TIMEOUT` だけが出た場合は、同じコマンドをそのまま再実行し、`EVENT` が出るまで繰り返す。親はイベントを受け取ったらJSONの `type` ごとに1文で人間へ伝える。`worker_report` は報告の要旨、`review_done` はレビュー完了、`pr_created` はPR作成、`pr_merged` はマージを伝え、詳細解説を求めるか尋ねる。`hanseikai` は例外で、次節の手順に従い本文を取得して直ちに承認判断に必要な内容を示す。
 
-`TIMEOUT` だけの場合は同じコマンドを再実行して監視を続ける。イベントを1件報告するたびに、次の監視を同じ条件で開始する。Issueがクローズされたら監視を終了する。監視イベント以外で、人間が「教えて」など関心を示した場合だけ、必要なIssueコメント・PR・関連worktreeを追加調査して詳しく説明する。
+親はイベントを人間へ伝えた直後、同じタスクで `invoke_subagent` を再度起動して監視を継続する。監視イベント以外で、人間が「教えて」など関心を示した場合だけ、必要なIssueコメント・PR・関連worktreeを追加調査して詳しく説明する。assistant の終了は人間が手動で行う。
 
 ## 技術的な質問への回答
 
