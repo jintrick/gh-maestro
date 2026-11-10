@@ -636,7 +636,7 @@ test('launchJobWorker: agyのprintジョブも結果ファイル経由で成立�
   const agentConfig = {
     id: 'agy',
     command: 'agy',
-    extraArgs: ['--dangerously-skip-permissions', '--print-timeout', '30m0s'],
+    extraArgs: ['--dangerously-skip-permissions'],
     promptDelivery: 'flag',
     promptFlag: '--print',
   };

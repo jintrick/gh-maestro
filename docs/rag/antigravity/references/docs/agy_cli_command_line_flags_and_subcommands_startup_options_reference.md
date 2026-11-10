@@ -17,7 +17,7 @@ fetched_at: 2026-06-11
 | `--prompt-interactive <prompt>` | `-i` | — | 初期プロンプトを渡しつつインタラクティブセッションを起動する |
 | `--print <prompt>` | `-p` | — | 非インタラクティブで1プロンプト実行して結果を標準出力に印字して終了する |
 | `--prompt <prompt>` | — | — | `--print` のエイリアス |
-| `--print-timeout <duration>` | — | `5m0s` | print モードのタイムアウト |
+| `--print-timeout <duration>` | — | `0s` | print モードのタイムアウト。0 はターンが完了するまで待つ（agy 1.5.3 の `agy --help` で確認、2026-11-10） |
 | `--model <model>` | — | — | このセッションで使用するモデルを指定する |
 | `--add-dir <path>` | — | `[]` | ワークスペースにディレクトリを追加する（繰り返し指定可） |
 | `--sandbox` | — | — | ターミナル制限付きサンドボックスで実行する |

@@ -62,9 +62,7 @@
       "command": "agy",
       "runtime": "agy",
       "extraArgs": [
-        "--dangerously-skip-permissions",
-        "--print-timeout",
-        "30m0s"
+        "--dangerously-skip-permissions"
       ],
       "execPromptDelivery": "flag",
       "execPromptFlag": "--print",
