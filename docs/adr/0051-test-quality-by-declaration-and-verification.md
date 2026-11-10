@@ -4,6 +4,8 @@ normative-file: AGENTS.md
 
 # テストの質は coder の申告を軸にし、Review Manager はその申告を検証する
 
+この判断のうち、変異確認を「新規・書き直しのテストすべて」に課す部分は `docs/adr/0060-mutation-check-scope-limited.md` で変更された。申告と検証の分担は維持される。
+
 ## 決めたこと
 
 質の低いテストの再生産を防ぐ手段は、Review Manager にテストの質をゼロから判定させることではなく、次の分担にする。
