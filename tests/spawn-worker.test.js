@@ -209,8 +209,9 @@ test('spawn-worker: coderの初回argvはagy基底引数を保ち、planExtraArg
   const [argvLine] = fs.readFileSync(captureFile, 'utf8').trim().split(/\r?\n/);
   const argv = JSON.parse(argvLine);
   assert.equal(argv[0], 'agy');
-  assert.deepEqual(argv.slice(1, 4), ['--dangerously-skip-permissions', '--print-timeout', '30m0s']);
-  assert.deepEqual(argv.slice(4, 6), ['--model', 'gemini-4-argon-low']);
+  assert.deepEqual(argv.slice(1, 2), ['--dangerously-skip-permissions']);
+  assert.equal(argv.includes('--print-timeout'), false);
+  assert.deepEqual(argv.slice(2, 4), ['--model', 'gemini-4-argon-low']);
   assert.equal(argv.includes('gemini-3.8-flash-medium'), false);
   assert.equal(argv.at(-2), '--print', 'agy promptFlag remains present after extraArgs resolution');
 

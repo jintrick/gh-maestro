@@ -503,7 +503,7 @@ function assertBaseArguments(runtime, argv, phase) {
     ? ['exec', '--dangerously-bypass-approvals-and-sandbox']
     : runtime === 'claude'
       ? ['--dangerously-skip-permissions', '--print']
-      : ['--dangerously-skip-permissions', '--print-timeout', '30m0s', '--print'];
+      : ['--dangerously-skip-permissions', '--print'];
   const missing = required.filter(arg => !argv.includes(arg));
   if (missing.length) fail(`${phase} argv から基底必須引数が欠落しています: ${missing.join(', ')}`);
 }

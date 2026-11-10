@@ -275,8 +275,8 @@ test('default agents keep literal argv for normal and Review Manager launches', 
       review: ['reasonix', 'run', '--dir', cwd, 'prompt'],
     },
     agy: {
-      normal: ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--print', 'prompt'],
-      review: ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--print', 'prompt'],
+      normal: ['agy', '--dangerously-skip-permissions', '--print', 'prompt'],
+      review: ['agy', '--dangerously-skip-permissions', '--print', 'prompt'],
     },
     'agy-interactive': {
       normal: ['agy', '--dangerously-skip-permissions', '--prompt-interactive', 'prompt'],
@@ -318,8 +318,8 @@ test('inherited codex and agy extraArgs are shared by normal and Review Manager 
 
     const agyNormal = buildAgentCommandArgs(agy, { shortPrompt: 'prompt' });
     const agyReview = buildAgentCommandArgs(normalizeAgentLaunchConfig(agy, cwd), { shortPrompt: 'prompt' });
-    assert.deepEqual(agyNormal, ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
-    assert.deepEqual(agyReview, ['agy', '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
+    assert.deepEqual(agyNormal, ['agy', '--dangerously-skip-permissions', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
+    assert.deepEqual(agyReview, ['agy', '--dangerously-skip-permissions', '--model', 'gemini-3.8-flash-medium', '--print', 'prompt']);
     // 期待値はリテラル（codex.extraArgs という検証対象から導出しない）
     assert.deepEqual(buildAgentExecArgs(codex), [
       'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox',

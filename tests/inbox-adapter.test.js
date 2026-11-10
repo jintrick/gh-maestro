@@ -253,7 +253,7 @@ test('integrated: agy の resume→buildAgentResumeCommandArgs で extraArgs が
 
   const argv = finalResult.argv;
 
-  // agy の extraArgs: ["--dangerously-skip-permissions", "--print-timeout", "30m0s"]
+  // agy の extraArgs: ["--dangerously-skip-permissions"]
   const skipPermCount = argv.filter(a => a === '--dangerously-skip-permissions').length;
   assert.equal(skipPermCount, 1, '--dangerously-skip-permissions should appear exactly once');
 

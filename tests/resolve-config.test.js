@@ -422,7 +422,7 @@ test('resolveAgentConfig: 不正 planExtraArgs は警告して同じレイヤー
       const agent = resolveAgentConfig('agy-plan', { homedir: home, warnFn: message => warnings.push(message) });
 
       assert.deepEqual(agent.resolvedPhaseArgs.planning, [
-        '--dangerously-skip-permissions', '--print-timeout', '30m0s', '--model', 'flash',
+        '--dangerously-skip-permissions', '--model', 'flash',
       ]);
       assert.equal(warnings.length, 1);
       assert.match(warnings[0], /agents\["agy-plan"\]\.planExtraArgs/);
@@ -445,7 +445,7 @@ test('resolveAgentConfig: extends layers keep base args and replace only the own
     });
 
     const agent = resolveAgentConfig('agy-flash', { homedir: home });
-    const baseArgs = ['--dangerously-skip-permissions', '--print-timeout', '30m0s'];
+    const baseArgs = ['--dangerously-skip-permissions'];
     const normalArgs = [...baseArgs, '--model', 'gemini-3.8-flash-medium'];
     const planArgs = [...baseArgs, '--model', 'gemini-4-argon-low'];
 
