@@ -214,7 +214,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 ### 9. 反省会と後始末【必須】
 <!-- gh-maestro-structure: middle-items=3 -->
 
-入口: 工程8の確認後。読む: `stage-9-retrospective.md`、反省会を実施するときは続けて`retrospective.md`。待つもの: 反省会または人間が承認したスキップ、決定事項本文。次: finalize後に終了。
+入口: 工程8の確認後。読む: `stage-9-retrospective.md`、反省会を実施するときは続けて`retrospective.md`。反省会では素案をIssueへ投稿する前に影響範囲と弊害の事前調査を完了する。待つもの: 反省会または人間が承認したスキップ、決定事項本文。次: finalize後に終了。
 
 - **9-[1/3] 分析対象を確認【必須】**
 - **9-[2/3] 実施または人間が判断【必須】**
@@ -280,7 +280,7 @@ PR監視・受信monitorの停止、slow state、worker-statusの復旧詳細は
 | gh-maestro-senior-coder | 広範な影響分析、複雑なロジック調整、設計判断を伴う実装・PR作成 |
 | gh-maestro-base | その他の動的役職。prompt-fileで役割を定義する |
 
-coder・senior-coder・explorer・diagnosticianは起動可否を人間に尋ねず、必要なら起動する。architectの起動可否・時機・相談内容は人間が決める。同一Issueに同じ役割のワーカーを複数起動しない。追加作業は既存workerへmsg-send.jsで指示し、並列化が必要ならIssueを分けて順に回す。
+coder・senior-coder・explorer・diagnosticianは起動可否を人間に尋ねず、必要なら起動する。architectの起動可否・時機・相談内容は人間が決める。通常の調査では同一Issueに同じ役割のワーカーを複数起動しない。追加作業は既存workerへmsg-send.jsで指示し、並列化が必要ならIssueを分けて順に回す。ただし工程9の反省会では、既存explorerを再開せず、反省会専用のexplorerを新規に1つ起動して全提案をまとめて調査する。
 
 coder / senior-coder には計画中と実装中で異なるモデルを割り当てられる。`agents.<id>.planExtraArgs` が設定されていれば、計画報告までの初回起動と差し戻し再開に限り、その定義自身の `extraArgs` 部分を置き換える。`extends` で受け継いだ引数は残る。未設定ならその定義の `extraArgs` を使う。設定値が文字列配列でない場合は警告して `extraArgs` に戻し、config.json は変更しない。workspace config からこの起動引数を上書きできない。書き方は `config.js --help` を参照する。
 

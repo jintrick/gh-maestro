@@ -136,6 +136,50 @@ test('工程2の既存判断照合がADRと保留Issueを確認先として含�
   assert.match(stage, /gh-maestro-pending/, '工程2が保留Issueの確認先を含むこと');
 });
 
+test('反省会は素案提示前に提案全体を専用explorerで調査し、影響範囲と弊害を記載する', () => {
+  const retrospective = fs.readFileSync(path.join(SKILL_DIR, 'retrospective.md'), 'utf8');
+  const stage9 = fs.readFileSync(path.join(SKILL_DIR, 'stage-9-retrospective.md'), 'utf8');
+  const investigation = retrospective.indexOf('## 3. 影響範囲と弊害の事前調査');
+  const consultation = retrospective.indexOf('## 4. コーダーへの意見聴取');
+  const presentation = retrospective.indexOf('## 5. 素案をIssueに提示する');
+
+  assert.ok(investigation >= 0, '影響範囲と弊害の事前調査の節があること');
+  assert.ok(investigation < consultation && consultation < presentation, '事前調査が意見聴取と素案提示より前であること');
+  assert.match(retrospective, /提案が0件ならexplorerを起動せず/);
+  assert.match(retrospective, /反省会専用のexplorerを新規に1つだけ起動し、すべての提案をまとめて依頼する/);
+  assert.match(retrospective, /同じIssueで工程2などに起動済みのexplorerを再開せず、提案ごとに起動もしない/);
+  assert.match(retrospective, /各提案が触るファイル、呼び出し元、提案の`paths:`に当てはまるファイル、既存コードのうち違反になる件数、既存の規範との重複・食い違い/);
+  assert.match(retrospective, /explorerには確認できた事実だけを報告させ、弊害の判断、提案の優先順位、修正方針は求めない/);
+  assert.match(stage9, /素案を提示する前に、同手順書の影響範囲と弊害の事前調査を完了する/);
+
+  for (const heading of [
+    '## 型・制御フローで防止',
+    '## Lintで検出',
+    '## テストで検出',
+    '## .claude/rules/化',
+    '## coder SKILL.md への追加',
+  ]) {
+    const start = retrospective.indexOf(heading);
+    const end = retrospective.indexOf('\n## ', start + heading.length);
+    const section = retrospective.slice(start, end === -1 ? retrospective.length : end);
+    assert.match(section, /影響範囲:/, `${heading}に影響範囲欄があること`);
+    assert.match(section, /弊害:/, `${heading}に弊害欄があること`);
+  }
+
+  assert.doesNotMatch(retrospective, /既存コードへの影響: 承認後に調査/);
+  assert.doesNotMatch(retrospective, /diagnosticianに既存違反の件数と改修範囲を調査させてからIssueを起票/);
+});
+
+test('通常のexplorer再利用規則と工程9専用の新規調査が矛盾しない', () => {
+  const stage2 = fs.readFileSync(path.join(SKILL_DIR, 'stage-2-research.md'), 'utf8');
+  const skill = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  assert.match(stage2, /工程2など通常の追加調査では、explorerは1つのIssueにつき1つ。クローズまで再利用/);
+  assert.match(stage2, /ただし工程9の反省会では、既存explorerを再開せず、反省会専用のexplorerを新規に1つ起動して全提案をまとめて調査する/);
+  assert.match(skill, /通常の調査では同一Issueに同じ役割のワーカーを複数起動しない/);
+  assert.match(skill, /ただし工程9の反省会では、既存explorerを再開せず、反省会専用のexplorerを新規に1つ起動して全提案をまとめて調査する/);
+});
+
 test('開発サイクルに工程番号のない裸の手順番号が残っていない', () => {
   const cycle = readDevelopmentCycle();
   const bareSteps = cycle.split(/\r?\n/).filter(line => /^\s*\d+\.\s/.test(line));
