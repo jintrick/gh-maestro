@@ -887,7 +887,7 @@ test('main: NODE_TEST_CONTEXT 環境下では実副作用を実行せず拒否�
 // 申告表は PR 本文ではなく、対象HEADのSHAをマーカーに持つ PR コメントに投稿する（PR本文は触らない）。
 // 既存PRは push の前に投稿して、レビューが新しいHEADを見る時点で申告表が揃うようにする。
 
-const DECLARATION_TABLE = '| テスト | 何が壊れたら失敗するか |\n|---|---|\n| t1 | 欠陥X |';
+const DECLARATION_TABLE = '| テスト | 何が壊れたら失敗するか | 期待値の出所 | 変異確認（実施結果／未実施の欠陥・理由） |\n|---|---|---|---|\n| t1 | 欠陥X | Issue要件 | 未実施（範囲外）: 欠陥X; 直接比較しており、欠陥Xならアサーションが失敗するため |';
 const DECLARATION_MARKER_LINE = `<!-- gh-maestro:pr-declaration head=${SHA} -->`;
 const isCommentCreate = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/5/comments` && args[2] === '-f';
 const isCommentPatch = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH';
@@ -898,7 +898,7 @@ test('buildPrBody は申告表に関係なく関連Issue行のみを返す（PR�
   assert.equal(mod.buildPrBodyWithDeclaration, undefined, '申告表をPR本文へ組み立てる経路は廃止している');
 });
 
-test('--declaration-file: 既存PRは push より前に、このHEADの申告表をPRコメントとして投稿し、PR本文は編集しない', () => {
+test('--declaration-file: 未実施の変異確認を記した表も push 前にPRコメントとして投稿し、PR本文は編集しない', () => {
   const handlers = [
     ...fullPathHandlers({ prList: { status: 0, stdout: JSON.stringify([{ number: 5, url: PR_URL }]) } }),
     { matches: ({ cmd, args }) => isCommentCreate(cmd, args), result: { status: 0, stdout: `{"html_url":"${DECL_URL}"}` } },
@@ -916,6 +916,7 @@ test('--declaration-file: 既存PRは push より前に、このHEADの申告表
   assert.ok(postIndex >= 0 && postIndex < pushIndex, '申告表コメントは push より前に投稿されるべき');
   const body = calls[postIndex].args[3];
   assert.equal(body, `body=${DECLARATION_MARKER_LINE}\n${DECLARATION_TABLE}\n`);
+  assert.match(body, /未実施（範囲外）: 欠陥X;.*アサーションが失敗する/);
   assert.equal(call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'edit'), undefined, 'PR本文を編集しない');
 });
 
