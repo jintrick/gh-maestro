@@ -214,7 +214,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 ### 9. 反省会と後始末【必須】
 <!-- gh-maestro-structure: middle-items=3 -->
 
-入口: 工程8の確認後。読む: `stage-9-retrospective.md`、反省会を実施するときは続けて`retrospective.md`。反省会では素案をIssueへ投稿する前に影響範囲と弊害の事前調査を完了する。待つもの: 反省会または人間が承認したスキップ、決定事項本文。次: finalize後に終了。
+入口: 工程8の確認後。読む: `stage-9-retrospective.md`、反省会を実施するときは続けて`retrospective.md`。反省会では素案をIssueへ投稿する前に影響範囲と弊害の事前調査を完了する。待つもの: 反省会（分析対象が0件なら待たずにスキップ）、決定事項本文。次: finalize後に終了。
 
 - **9-[1/3] 分析対象を確認【必須】**
 - **9-[2/3] 実施または人間が判断【必須】**
