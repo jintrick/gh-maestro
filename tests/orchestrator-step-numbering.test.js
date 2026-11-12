@@ -201,13 +201,39 @@ test('開発サイクルが工程1〜9で構成され、工程3に「抽象設�
   );
 });
 
-test('12手順書の合図宣言が存在し、通知・script合図が実際の配信経路に結び付いている', () => {
+test('工程5の中項目数がIssue #766の受け入れ条件どおり3つである', () => {
+  const cycle = readDevelopmentCycle();
+  const stage5 = readStage(cycle, 5);
+
+  assert.equal(readDeclaredMiddleItemTotal(stage5, 5), 3, '工程5の中項目数が3つであること');
+});
+
+test('13手順書の合図宣言が存在し、通知・script合図が実際の配信経路に結び付いている', () => {
   const expectedFiles = [
     'stage-1-requirements.md', 'stage-2-research.md', 'stage-3-architect.md',
     'stage-4-coder.md', 'stage-5-plan-review.md', 'stage-6-implementation-start.md',
     'stage-7-review-merge.md', 'stage-8-deployment-check.md', 'stage-9-retrospective.md',
-    'triage.md', 'retrospective.md', 'lightweight-pr.md',
+    'triage.md', 'retrospective.md', 'lightweight-pr.md', 'premise-check.md',
   ];
+  const actualFiles = fs.readdirSync(SKILL_DIR)
+    .filter(file => file.endsWith('.md'))
+    .filter((file) => {
+      const content = fs.readFileSync(path.join(SKILL_DIR, file), 'utf8');
+      const { signals } = parseFrontmatter(content);
+      return Array.isArray(signals) && signals.length > 0;
+    });
+  const expectedFileSet = new Set(expectedFiles);
+  const actualFileSet = new Set(actualFiles);
+  assert.deepEqual(
+    [...actualFileSet].filter(file => !expectedFileSet.has(file)).sort(),
+    [],
+    'expectedFilesに無い配信合図付き手順書が追加されていないこと',
+  );
+  assert.deepEqual(
+    [...expectedFileSet].filter(file => !actualFileSet.has(file)).sort(),
+    [],
+    'expectedFilesにある配信合図付き手順書がすべて存在すること',
+  );
   const eventTableStart = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## イベントの受け口');
   const eventTableEnd = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## 横断的な手続き', eventTableStart);
   const skill = fs.readFileSync(SKILL_PATH, 'utf8');
@@ -233,6 +259,10 @@ test('12手順書の合図宣言が存在し、通知・script合図が実際の
         const prompt = `<task-notification><event>${name}:42</event></task-notification>`;
         const output = renderNotificationGuidance({ workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR, prompt });
         assert.match(output, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${name}で${file}が配信されること`);
+        if (name === 'PLAN_REPORTED') {
+          assert.match(output, /以下は stage-5-plan-review\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで工程5の手順書本文が届くこと');
+          assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで前提確認の問い本文も届くこと');
+        }
         assert.ok(output.length <= 9000, `${name}の追加文脈が9000文字以下であること`);
       } else if (signal.startsWith('script:')) {
         const [, scriptName] = /^script:([^:]+):(.+)$/.exec(signal) || [];
@@ -249,6 +279,7 @@ test('12手順書の合図宣言が存在し、通知・script合図が実際の
   }
 
   assert.deepEqual([...signalsByFile.keys()].sort(), [...expectedFiles].sort());
+  assert.ok(signalsByFile.get('premise-check.md').includes('notify:PLAN_REPORTED'), 'premise-check.mdがPLAN_REPORTEDを宣言すること');
   const merged = renderNotificationGuidance({
     workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR,
     prompt: '<task-notification><event>PR_MERGED:42</event></task-notification>',

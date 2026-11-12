@@ -29,7 +29,7 @@ const EXCLUDED_FILES = [
 // Exempt only that single reference; all other references in the ADR remain checked.
 const HISTORICAL_REFERENCE_EXCEPTION = {
   source: 'docs/adr/0051-test-quality-by-declaration-and-verification.md',
-  line: 11,
+  line: 13,
   target: '.claude/rules/test-quality-criteria.md',
 };
 
