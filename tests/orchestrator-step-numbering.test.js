@@ -215,6 +215,25 @@ test('13手順書の合図宣言が存在し、通知・script合図が実際の
     'stage-7-review-merge.md', 'stage-8-deployment-check.md', 'stage-9-retrospective.md',
     'triage.md', 'retrospective.md', 'lightweight-pr.md', 'premise-check.md',
   ];
+  const actualFiles = fs.readdirSync(SKILL_DIR)
+    .filter(file => file.endsWith('.md'))
+    .filter((file) => {
+      const content = fs.readFileSync(path.join(SKILL_DIR, file), 'utf8');
+      const { signals } = parseFrontmatter(content);
+      return Array.isArray(signals) && signals.length > 0;
+    });
+  const expectedFileSet = new Set(expectedFiles);
+  const actualFileSet = new Set(actualFiles);
+  assert.deepEqual(
+    [...actualFileSet].filter(file => !expectedFileSet.has(file)).sort(),
+    [],
+    'expectedFilesに無い配信合図付き手順書が追加されていないこと',
+  );
+  assert.deepEqual(
+    [...expectedFileSet].filter(file => !actualFileSet.has(file)).sort(),
+    [],
+    'expectedFilesにある配信合図付き手順書がすべて存在すること',
+  );
   const eventTableStart = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## イベントの受け口');
   const eventTableEnd = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## 横断的な手続き', eventTableStart);
   const skill = fs.readFileSync(SKILL_PATH, 'utf8');

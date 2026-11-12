@@ -5,6 +5,7 @@ paths:
   - "skills/gh-maestro-orchestrator/triage.md"
   - "skills/gh-maestro-orchestrator/retrospective.md"
   - "skills/gh-maestro-orchestrator/lightweight-pr.md"
+  - "skills/gh-maestro-orchestrator/premise-check.md"
   - "tests/orchestrator-step-numbering.test.js"
 ---
 
