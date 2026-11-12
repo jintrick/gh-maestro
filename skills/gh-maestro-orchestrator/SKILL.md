@@ -183,6 +183,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 - **5-[2/3] architectの計画レビューを問う【任意】**
 - **5-[3/3] 承認・差し戻し・人間への問い【必須】**
 理由と経緯: docs/adr/0058-orchestrator-approves-recommended-plans.md
+理由と経緯: docs/adr/0061-plan-form-questioned-by-orchestrator.md
 
 ### 6. 実装開始指示【必須】
 <!-- gh-maestro-structure: middle-items=1 -->
