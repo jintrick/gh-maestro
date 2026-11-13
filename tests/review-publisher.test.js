@@ -191,6 +191,15 @@ test('review comment API arguments use line anchors for inline comments and subj
   assert.ok(calls[0].args.includes('side=RIGHT'));
   assert.ok(calls[0].args.some((arg) => arg.includes(marker)));
 
+  assert.deepEqual(calls[1].args, [
+    'api',
+    'repos/acme/repo/pulls/12/comments',
+    '-X', 'POST',
+    '-f', 'body=[Correctness] 🔴 **BLOCKER**: Save is not awaited\n判定根拠: APIが成功を返した後に永続化が失敗するとデータ損失が発生する\n\n変更後のコードは saveUser(user) を await せずに呼び出している。saveUser が reject されると API は成功を返しているにもかかわらずデータが永続化されない。await を追加して修正する。\n\n位置に結び付けられなかったため、ファイル単位で投稿しました（ambiguous_anchor）。\n\n' + marker,
+    '-f', 'commit_id=deadbeef',
+    '-f', 'path=src/foo.ts',
+    '-f', 'subject_type=file',
+  ]);
   assert.ok(calls[1].args.includes('subject_type=file'));
   assert.ok(!calls[1].args.some((arg) => arg === 'line=8' || arg.startsWith('line=')));
   assert.ok(!calls[1].args.includes('side=RIGHT'));

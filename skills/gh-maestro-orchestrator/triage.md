@@ -75,7 +75,7 @@ node "{{SCRIPTS_PATH}}/review-threads.js" reply \
 
 - **無視**: 決定の返信が成功したら、同じ指摘の `threadId` を `resolve` に渡してResolveする。
 - **保留Issueに積む**: `pending-list.md` の規則に従い、元スレッドURL入りの行を共通Issueへ追記する。投稿コマンドが返したコメントURLを決定返信に書き、返信成功後にスレッドをResolveする。
-- **コーダーに修正依頼**: Issueへの修正依頼を送った後、決定・理由・修正依頼先と「修正push後にコミットを追記してResolveする」ことをスレッドへ返信する。スレッドはまだResolveしない。修正push後のコミット返信とResolveは工程7-[4/6]で行う。
+- **コーダーに修正依頼**: Issueへ修正依頼を送り、そのIssueを返信の対応先に記録する。修正依頼後にスレッドへ決定・理由・Issue番号と「修正push後にコミットSHAを返信してResolveする」ことを返信する。この段階ではResolveしない。push後のSHA返信とResolveは工程7-[4/6]で行う。
 
 ## 修正push後の返信
 
@@ -93,23 +93,12 @@ node "{{SCRIPTS_PATH}}/review-threads.js" resolve --thread-id <threadId>
 
 返信先を一意に照合できない場合はResolveしない。返信・Resolveの失敗は指摘、操作、理由を分けて人間に示し、commit・push・mergeの機械停止条件にはしない。
 
-- **コーダーに修正依頼**:
-  ```sh
-  node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
-  修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #<PR番号> のレビュー指摘より）修正後は `push-and-declare.js` で push とテスト結果申告まで行い、完了したら即報告してください。
-  対応するレビュー: <thread URL>
-  EOF
-  # senior-coder を使っていた場合は --skill gh-maestro-senior-coder
-  ```
-  同一トリアージサイクルで他にも「コーダーに修正依頼」と決まった指摘があれば、まとめて1回のメッセージで送ってよい。
-- **無視**: 何もしない。
-- **保留Issueに積む**: 何を積むか・いつ切り出すかの判断原則と、`$PENDING_ISSUE` の取得手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/pending-list.md` にある。
-  ```sh
-  node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/pending-<N>.md --stdin <<'EOF'
-  [保留] <path>:<line またはファイル単位> — <内容>（PR #<PR> のレビュー: <thread URL>）
-  EOF
-  node "{{SCRIPTS_PATH}}/comment-issue.js" \
-    --issue $PENDING_ISSUE --repo $REPO --workspace $WORKSPACE \
-    --body-file /tmp/pending-<N>.md
-  ```
-  `comment-issue.js` が返すコメントURLを返信の対応先に記録する。
+修正依頼は次のコマンドでIssueへ送り、上記の共通返信形式で依頼先を元スレッドへ記録する。複数の修正依頼は同じトリアージサイクル内でまとめてよい。
+
+```sh
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
+修正依頼: <path>:<line またはファイル単位> — <問題の説明>。<修正方針>。（PR #<PR番号> のレビュー指摘より）修正後は `push-and-declare.js` で push とテスト結果申告まで行い、完了したら即報告してください。
+対応するレビュー: <thread URL>
+EOF
+# senior-coder を使っていた場合は --skill gh-maestro-senior-coder
+```
