@@ -150,7 +150,7 @@ test('反省会は素案提示前に提案全体を専用explorerで調査し、
   assert.match(retrospective, /同じIssueで工程2などに起動済みのexplorerを再開せず、提案ごとに起動もしない/);
   assert.match(retrospective, /各提案が触るファイル、呼び出し元、提案の`paths:`に当てはまるファイル、既存コードのうち違反になる件数、既存の規範との重複・食い違い/);
   assert.match(retrospective, /explorerには確認できた事実だけを報告させ、弊害の判断、提案の優先順位、修正方針は求めない/);
-  assert.match(stage9, /素案を提示する前に、同手順書の影響範囲と弊害の事前調査を完了する/);
+  assert.match(stage9, /素案を提示する前に、同スキル断片の影響範囲と弊害の事前調査を完了する/);
 
   for (const heading of [
     '## 型・制御フローで防止',
@@ -208,12 +208,13 @@ test('工程5の中項目数がIssue #766の受け入れ条件どおり3つで�
   assert.equal(readDeclaredMiddleItemTotal(stage5, 5), 3, '工程5の中項目数が3つであること');
 });
 
-test('13手順書の合図宣言が存在し、通知・script合図が実際の配信経路に結び付いている', () => {
+test('15スキル断片の合図宣言が存在し、通知・script合図が実際の配信経路に結び付いている', () => {
   const expectedFiles = [
     'stage-1-requirements.md', 'stage-2-research.md', 'stage-3-architect.md',
     'stage-4-coder.md', 'stage-5-plan-review.md', 'stage-6-implementation-start.md',
     'stage-7-review-merge.md', 'stage-8-deployment-check.md', 'stage-9-retrospective.md',
-    'triage.md', 'retrospective.md', 'lightweight-pr.md', 'premise-check.md',
+    'triage.md', 'retrospective.md', 'lightweight-pr.md',
+    'premise-check.md', 'premise-check-stage-5.md', 'premise-check-stage-7.md',
   ];
   const actualFiles = fs.readdirSync(SKILL_DIR)
     .filter(file => file.endsWith('.md'))
@@ -227,12 +228,18 @@ test('13手順書の合図宣言が存在し、通知・script合図が実際の
   assert.deepEqual(
     [...actualFileSet].filter(file => !expectedFileSet.has(file)).sort(),
     [],
-    'expectedFilesに無い配信合図付き手順書が追加されていないこと',
+    'expectedFilesに無い配信合図付きスキル断片が追加されていないこと',
   );
   assert.deepEqual(
     [...expectedFileSet].filter(file => !actualFileSet.has(file)).sort(),
     [],
-    'expectedFilesにある配信合図付き手順書がすべて存在すること',
+    'expectedFilesにある配信合図付きスキル断片がすべて存在すること',
+  );
+  const stage1Premise = fs.readFileSync(path.join(SKILL_DIR, 'premise-check-stage-1.md'), 'utf8');
+  assert.equal(
+    parseFrontmatter(stage1Premise).signals,
+    null,
+    'premise-check-stage-1.mdは合図を持たないこと',
   );
   const eventTableStart = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## イベントの受け口');
   const eventTableEnd = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## 横断的な手続き', eventTableStart);
@@ -260,14 +267,20 @@ test('13手順書の合図宣言が存在し、通知・script合図が実際の
         const output = renderNotificationGuidance({ workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR, prompt });
         assert.match(output, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${name}で${file}が配信されること`);
         if (name === 'PLAN_REPORTED') {
-          assert.match(output, /以下は stage-5-plan-review\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで工程5の手順書本文が届くこと');
-          assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで前提確認の問い本文も届くこと');
+          assert.match(output, /以下は stage-5-plan-review\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで工程5のスキル断片本文が届くこと');
+          assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで前提確認の共通定義スキル断片本文も届くこと');
+          assert.match(output, /以下は premise-check-stage-5\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで前提確認の工程5スキル断片本文も届くこと');
+          assert.doesNotMatch(output, /以下は premise-check-stage-1\.md の現在の内容です。/, 'PLAN_REPORTEDで工程1スキル断片は届かないこと');
+          assert.doesNotMatch(output, /以下は premise-check-stage-7\.md の現在の内容です。/, 'PLAN_REPORTEDで工程7スキル断片は届かないこと');
         }
         if (name === 'PR_REVIEW' || name === 'REVIEW_COMMENT') {
-          assert.match(output, /以下は triage\.md の現在の内容です。事実として参照してください。/, `${name}でトリアージ手順書本文が届くこと`);
-          assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, `${name}で前提確認の問い本文も届くこと`);
+          assert.match(output, /以下は triage\.md の現在の内容です。事実として参照してください。/, `${name}でトリアージのスキル断片本文が届くこと`);
+          assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, `${name}で前提確認の共通定義スキル断片本文も届くこと`);
+          assert.match(output, /以下は premise-check-stage-7\.md の現在の内容です。事実として参照してください。/, `${name}で前提確認の工程7スキル断片本文も届くこと`);
+          assert.doesNotMatch(output, /以下は premise-check-stage-1\.md の現在の内容です。/, `${name}で工程1スキル断片は届かないこと`);
+          assert.doesNotMatch(output, /以下は premise-check-stage-5\.md の現在の内容です。/, `${name}で工程5スキル断片は届かないこと`);
         }
-        assert.ok(output.length <= 9000, `${name}の追加文脈が9000文字以下であること`);
+        assert.ok(output.length <= 9000, `${name}で届くスキル断片が9000文字以下であること`);
       } else if (signal.startsWith('script:')) {
         const [, scriptName] = /^script:([^:]+):(.+)$/.exec(signal) || [];
         assert.ok(scriptName, `${file}のscript合図形式が有効であること`);
@@ -288,11 +301,21 @@ test('13手順書の合図宣言が存在し、通知・script合図が実際の
     ['notify:PLAN_REPORTED', 'notify:PR_REVIEW', 'notify:REVIEW_COMMENT'],
     'premise-check.mdがPLAN_REPORTED・PR_REVIEW・REVIEW_COMMENTを宣言すること',
   );
+  assert.deepEqual(
+    [...signalsByFile.get('premise-check-stage-5.md')].sort(),
+    ['notify:PLAN_REPORTED'],
+    'premise-check-stage-5.mdがPLAN_REPORTEDだけを宣言すること',
+  );
+  assert.deepEqual(
+    [...signalsByFile.get('premise-check-stage-7.md')].sort(),
+    ['notify:PR_REVIEW', 'notify:REVIEW_COMMENT'],
+    'premise-check-stage-7.mdがPR_REVIEW・REVIEW_COMMENTだけを宣言すること',
+  );
   const merged = renderNotificationGuidance({
     workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR,
     prompt: '<task-notification><event>PR_MERGED:42</event></task-notification>',
   });
-  assert.ok(merged.length <= 9000, `PR_MERGEDの合計追加文脈が9000文字以下であること（${merged.length}）`);
+  assert.ok(merged.length <= 9000, `PR_MERGEDで届くスキル断片の合計が9000文字以下であること（${merged.length}）`);
 });
 
 test('notify合図はイベント名と完全一致し、部分一致だけする誤記を拒否する', () => {
