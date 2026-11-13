@@ -44,10 +44,11 @@ fi
 ## 保留Issueへの追記
 
 人間が「保留Issueに積む」を選んだら、その場で追記する。「後で書く」は禁止。
+Review Manager の指摘を積む行には、元PR番号と元レビュースレッドURLを必ず含める。`comment-issue.js` が返した保留コメントURLは、元スレッドへの決定返信にも記録し、その返信が成功してから元スレッドをResolveする。
 
 ```sh
 node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/pending-<N>.md --stdin <<'EOF'
-[保留] <path>:<line> — <内容>
+[保留] <path>:<line またはファイル単位> — <内容>（PR #<PR> のレビュー: <thread URL>）
 EOF
 node "{{SCRIPTS_PATH}}/comment-issue.js" \
   --issue $PENDING_ISSUE --repo $REPO --workspace $WORKSPACE \
@@ -62,7 +63,7 @@ node "{{SCRIPTS_PATH}}/comment-issue.js" \
 # 対応する項目をグループ化して新規Issueとして切り出す
 node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/issue-extract.md --stdin <<EOF
 Issue #$PENDING_ISSUE の保留項目から切り出し。
-- <path>:<line> — <内容>
+- <path>:<line またはファイル単位> — <内容>（PR #<PR> のレビュー: <thread URL>）
 EOF
 
 # --workspace は必ず明示する（省略するとIssue作成先のworkspaceがずれる。「1. 要件確定」参照）

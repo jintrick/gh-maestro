@@ -7,11 +7,20 @@ signals:
 
 Review Manager の指摘を入力にするときは、通知本文ではなく `node "{{SCRIPTS_PATH}}/read-review-findings.js" --pr <PR> --workspace $WORKSPACE` の全文を使う（通知本文は途中で切れうる）。終了コード2・3は「指摘なし」ではないので、原因を確認してから進める。
 
+同じPRの Review Manager 指摘スレッドを次のコマンドで照合する。`finding` 番号は全文出力の通し番号に対応し、現在の `manager.json` のバイト列から作ったマーカーで世代も照合する。対応する行がない、または複数ある場合はトリアージを進めず、その事実を人間に示す。
+
+```sh
+node "{{SCRIPTS_PATH}}/review-threads.js" list \
+  --pr <PR> --repo $REPO --workspace $WORKSPACE
+```
+
+出力の `url` を返信先、`commentId` を返信先コメント、`threadId` を Resolve 対象として使う。`isResolved` が true の指摘を未処理として実行しない。修正後の確認では `list --pr <PR> --repo $REPO` を使い、過去世代を含むスレッドを取得する。
+
 指摘を人間の決定なしに実行してはならないという不変条件はSKILL.md側にある。このファイルは評価・提示・実行の手順だけを持つ。人間への提示・質問はSKILL.md「人間への発言の規範」に従う。
 
 ## 実害度スコア（すべての指摘に付ける）
 
-人間がコーダーに修正依頼するか無視するかを判断するための、その場限りの提示材料。記録には残さない。
+人間が対応を判断する材料。実害度と一言理由は、人間の決定後にその指摘のレビュースレッドへ記録する。
 
 | スコア | 意味 | 例 |
 |---|---|---|
@@ -27,7 +36,7 @@ SUGGESTION には「その提案を採用しなかった場合に何が起きる
 
 ## 対応コスト（すべての指摘に付ける）
 
-人間がすぐ対応させるか保留するかを判断するための、その場限りの提示材料。記録には残さない。
+人間がすぐ対応させるか保留するかを判断する材料。対応コストと一言理由は、人間の決定後にその指摘のレビュースレッドへ記録する。
 
 | コスト | 判断基準 |
 |---|---|
@@ -37,35 +46,59 @@ SUGGESTION には「その提案を採用しなかった場合に何が起きる
 
 ## 人間への提示（観点・スコアの値にかかわらず必ず行う）
 
-指摘は1件1行、複数件は1つの一覧テーブルにまとめる。指摘ごとに個別のテーブルを作らない。各行に1から始まる通し番号を振り、人間が番号だけで対応を指定できるようにする。重要度と観点は、Review Managerが付けた値をそのまま転記し、orchestratorが解釈・変更しない。重要度は指摘本文の先頭に付与されたラベル（🔴BLOCKER/🟡MAJOR/🟢SUGGESTION）を指す。観点の語はレビュー側の正本（`skills/gh-maestro-reviewer/`）にあるものを使い、言い換えない。要約は2〜3文以内に圧縮し、抽象度を上げて書く。指摘本文の語をそのまま縮めない。何の話かが一読で分かる水準まで上げ、成立する条件があればそれも落とさない。原因の詳細な説明はfindingsの本文に譲る。スコア・コストの理由は必ず一言（15字程度）に圧縮する。
+指摘は1件1行、複数件は1つの一覧テーブルにまとめる。指摘ごとに個別のテーブルを作らない。各行に1から始まる通し番号を振り、人間が番号だけで対応を指定できるようにする。既知の重複をクラスタ化して1行にまとめる場合は、対応するすべての finding 番号とスレッドURLを列挙し、人間の決定を各スレッドへ記録する。重要度と観点は、Review Managerが付けた値をそのまま転記し、orchestratorが解釈・変更しない。重要度は指摘本文の先頭に付与されたラベル（🔴BLOCKER/🟡MAJOR/🟢SUGGESTION）を指す。観点の語はレビュー側の正本（`skills/gh-maestro-reviewer/`）にあるものを使い、言い換えない。要約は2〜3文以内に圧縮し、抽象度を上げて書く。指摘本文の語をそのまま縮めない。何の話かが一読で分かる水準まで上げ、成立する条件があればそれも落とさない。原因の詳細な説明はfindingsの本文に譲る。スコア・コストの理由は必ず一言（15字程度）に圧縮する。
 
 ```
 ### PR #$PR — レビュー指摘
 
-| # | 重要度 | 観点 | 対象 | 要約 | 実害度 | 対応コスト | 推奨 |
-|---|---|---|---|---|---|---|---|
-| 1 | <🔴BLOCKER/🟡MAJOR/🟢SUGGESTION> | <Review Managerが付けた観点> | <path>:<line> | <要約（2〜3文以内）> | <N>/5 — <一言理由> | <低/中/高> — <一言理由> | <コーダーに修正依頼/無視/保留Issueに積む> |
+| # | 重要度 | 観点 | 対象 | 要約 | 返信先（finding番号・URL） | 実害度 | 対応コスト | 推奨 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | <🔴BLOCKER/🟡MAJOR/🟢SUGGESTION> | <Review Managerが付けた観点> | <path>:<line またはファイル単位> | <要約（2〜3文以内）> | <finding N: URL。複数ならすべて列挙> | <N>/5 — <一言理由> | <低/中/高> — <一言理由> | <コーダーに修正依頼/無視/保留Issueに積む> |
 ```
 
 表の「推奨」列は、各行で「コーダーに修正依頼」「無視」「保留Issueに積む」のどれか1つに決めて書く。表を提示した後、「推奨のとおりに進めてよいですか？」という一つの問いを末尾に置き、人間の回答を待ってから実行する。承認されたら推奨どおりに実行する。人間が一部の番号に別の対応を指定したら、その番号は指定に従い、残りは推奨どおりに実行する。問いの形はSKILL.md「人間への発言の規範」に従う。
 
 ## 人間の回答に従った実行
 
-- **コーダーに修正依頼**:
-  ```sh
-  node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
-  修正依頼: <path>:<line> — <問題の説明>。<修正方針>。（PR #<PR番号> のレビュー指摘より）修正後は `push-and-declare.js` で push とテスト結果申告まで行い、完了したら即報告してください。
-  EOF
-  # senior-coder を使っていた場合は --skill gh-maestro-senior-coder
-  ```
-  同一トリアージサイクルで他にも「コーダーに修正依頼」と決まった指摘があれば、まとめて1回のメッセージで送ってよい。
-- **無視**: 何もしない。
-- **保留Issueに積む**: 何を積むか・いつ切り出すかの判断原則と、`$PENDING_ISSUE` の取得手順は `{{SHARED_SKILLS_PATH}}/gh-maestro-orchestrator/pending-list.md` にある。
-  ```sh
-  node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/pending-<N>.md --stdin <<'EOF'
-  [保留] <path>:<line> — <内容>
-  EOF
-  node "{{SCRIPTS_PATH}}/comment-issue.js" \
-    --issue $PENDING_ISSUE --repo $REPO --workspace $WORKSPACE \
-    --body-file /tmp/pending-<N>.md
-  ```
+決定が定まった指摘には、必ず返信と必要な Resolve を行う。返信本文には `決定`、`理由`、`対応先` を書く。推奨どおりなら、理由に表の実害度・対応コストの一言理由を記録する。人間が推奨と違う対応を指定した場合は推奨も併記し、人間が述べた理由をそのまま記録する。理由が述べられていなければ `人間の指定` と書く。返信は `review-threads.js reply`、Resolve は `review-threads.js resolve` を使う。返信が失敗した指摘はResolveしない。返信またはResolveに失敗したら、指摘、操作、エラーを分けて人間に示す。
+
+```sh
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/review-thread-<N>.md --stdin <<'EOF'
+決定: <人間が決めた対応>
+推奨: <人間が推奨と違う対応を指定した場合のみ>
+理由: <推奨どおりなら実害度と対応コストの理由。異なる対応なら人間の理由。未提示なら「人間の指定」>
+対応先: <対応先または「なし」>
+EOF
+node "{{SCRIPTS_PATH}}/review-threads.js" reply \
+  --pr <PR> --repo $REPO --comment-id <commentId> --body-file /tmp/review-thread-<N>.md
+```
+
+- **無視**: 決定の返信が成功したら、同じ指摘の `threadId` を `resolve` に渡してResolveする。
+- **保留Issueに積む**: `pending-list.md` の規則に従い、元スレッドURL入りの行を共通Issueへ追記する。投稿コマンドが返したコメントURLを決定返信に書き、返信成功後にスレッドをResolveする。
+- **コーダーに修正依頼**: Issueへ修正依頼を送り、そのIssueを返信の対応先に記録する。修正依頼後にスレッドへ決定・理由・Issue番号と「修正push後にコミットSHAを返信してResolveする」ことを返信する。この段階ではResolveしない。push後のSHA返信とResolveは工程7-[4/6]で行う。
+
+## 修正push後の返信
+
+工程7-[4/6]で修正を確認したら、過去世代を含む一覧からトリアージ時のURL・findingマーカーに一致する元スレッドを1件に特定し、修正コミットSHAを返信する。返信の成功を確認してから `resolve` を実行する。複数の指摘を1つのコミットで直した場合は、該当する各スレッドへ同じSHAを返信する。
+
+```sh
+node "{{SCRIPTS_PATH}}/review-threads.js" list --pr <PR> --repo $REPO
+node "{{SCRIPTS_PATH}}/write-draft.js" /tmp/review-fixed-<N>.md --stdin <<'EOF'
+修正コミット: <SHA>
+EOF
+node "{{SCRIPTS_PATH}}/review-threads.js" reply \
+  --pr <PR> --repo $REPO --comment-id <commentId> --body-file /tmp/review-fixed-<N>.md
+node "{{SCRIPTS_PATH}}/review-threads.js" resolve --thread-id <threadId>
+```
+
+返信先を一意に照合できない場合はResolveしない。返信・Resolveの失敗は指摘、操作、理由を分けて人間に示し、commit・push・mergeの機械停止条件にはしない。
+
+修正依頼は次のコマンドでIssueへ送り、上記の共通返信形式で依頼先を元スレッドへ記録する。複数の修正依頼は同じトリアージサイクル内でまとめてよい。
+
+```sh
+node "{{SCRIPTS_PATH}}/msg-send.js" --issue <実装Issue> --skill gh-maestro-coder --workspace $WORKSPACE --stdin <<'EOF'
+修正依頼: <path>:<line またはファイル単位> — <問題の説明>。<修正方針>。（PR #<PR番号> のレビュー指摘より）修正後は `push-and-declare.js` で push とテスト結果申告まで行い、完了したら即報告してください。
+対応するレビュー: <thread URL>
+EOF
+# senior-coder を使っていた場合は --skill gh-maestro-senior-coder
+```
