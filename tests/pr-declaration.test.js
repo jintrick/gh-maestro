@@ -79,7 +79,7 @@ test('upsertDeclarationComment: 同じHEADの既存コメントが無ければ�
   calls.length = 0;
   const updated = upsertDeclarationComment({ pr: 5, repo: 'o/r', headSha: HEAD, table: TABLE, listCommentsFn: existing, spawnSyncFn });
   assert.equal(updated.action, 'updated');
-  assert.deepEqual(calls[0].args.slice(0, 4), ['api', '-X', 'PATCH', 'repos/o/r/issues/comments/77']);
+  assert.deepEqual(calls[0].args.slice(0, 6), ['api', 'repos/o/r/issues/comments/77', '-X', 'PATCH', '-F', 'body=@-']);
 });
 
 test('upsertDeclarationComment: 投稿に失敗したら ok:false を返す（例外にしない）', () => {
@@ -137,11 +137,35 @@ test('upsertDeclarationComment: 32KB超（約98KB）の日本語申告表を新�
     assert.equal(calls[0].cmd, 'gh');
     const expectedArgs = mode === 'create'
       ? ['api', 'repos/o/r/issues/5/comments', '-X', 'POST', '-F', 'body=@-']
-      : ['api', '-X', 'PATCH', 'repos/o/r/issues/comments/77', '-F', 'body=@-'];
+      : ['api', 'repos/o/r/issues/comments/77', '-X', 'PATCH', '-F', 'body=@-'];
     assert.deepEqual(calls[0].args, expectedArgs);
     assert.ok(calls[0].args.join(' ').length < 256, 'argv に長文申告表を含めない');
     assert.equal(calls[0].opts.encoding, 'utf8');
     assert.equal(calls[0].opts.timeout, 30000);
     assert.equal(calls[0].opts.input, expectedBody);
   }
+});
+
+test('upsertDeclarationComment / readPrDeclarationEvidence: 空白のみ stderr 時に ghErrorDetail で error.message へフォールバックする', () => {
+  const postRes = upsertDeclarationComment({
+    pr: 5,
+    repo: 'o/r',
+    headSha: HEAD,
+    table: '| テスト | 欠陥 | 出所 | 変異 |\n|---|---|---|---|\n| t | d | s | m |',
+    listCommentsFn: () => ({ status: 0, stdout: '[]' }),
+    spawnSyncFn: () => ({ status: null, stdout: '', stderr: '   \n', error: new Error('write EPIPE') }),
+  });
+  assert.equal(postRes.ok, false);
+  assert.match(postRes.error, /write EPIPE/);
+  assert.doesNotMatch(postRes.error, /unknown error/);
+
+  const readRes = readPrDeclarationEvidence({
+    pr: 5,
+    repo: 'o/r',
+    headSha: HEAD,
+    listCommentsFn: () => ({ status: null, stdout: '', stderr: '\t ', error: new Error('list timed out') }),
+  });
+  assert.equal(readRes.status, 'unavailable');
+  assert.match(readRes.reason, /list timed out/);
+  assert.doesNotMatch(readRes.reason, /unknown error/);
 });

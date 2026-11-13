@@ -7,7 +7,7 @@
 // 申告表の投稿者は信頼される association（OWNER / MEMBER / COLLABORATOR）に限る。
 
 const { spawnSync } = require('./child-process');
-const { listComments, createComment, updateComment, parseCommentsResponse } = require('./gh-comments');
+const { listComments, createComment, updateComment, ghErrorDetail, parseCommentsResponse } = require('./gh-comments');
 const { isTrustedCommentAuthor } = require('./comment-author-trust');
 
 const DECLARATION_MARKER_PREFIX = 'gh-maestro:pr-declaration';
@@ -73,8 +73,8 @@ function readPrDeclarationEvidence({ pr, repo, headSha, listCommentsFn = listCom
     return unavailable(`PRコメントの取得に失敗しました: ${error.message}`);
   }
   if (!listed || listed.error || listed.status !== 0) {
-    const detail = (listed && (listed.stderr || (listed.error && listed.error.message))) || 'unknown error';
-    return unavailable(`PRコメントの取得に失敗しました: ${String(detail).trim()}`);
+    const detail = ghErrorDetail(listed, { fallback: 'unknown error' });
+    return unavailable(`PRコメントの取得に失敗しました: ${detail}`);
   }
   let comments;
   try {
@@ -104,8 +104,8 @@ function upsertDeclarationComment({ pr, repo, headSha, table, cwd, listCommentsF
   }
   const listed = listCommentsFn(repo, pr, { cwd });
   if (!listed || listed.error || listed.status !== 0) {
-    const detail = (listed && listed.stderr) || 'unknown error';
-    return { ok: false, error: `申告表コメントの一覧取得に失敗しました: ${String(detail).trim()}` };
+    const detail = ghErrorDetail(listed, { fallback: 'unknown error' });
+    return { ok: false, error: `申告表コメントの一覧取得に失敗しました: ${detail}` };
   }
   let comments;
   try {
@@ -122,8 +122,8 @@ function upsertDeclarationComment({ pr, repo, headSha, table, cwd, listCommentsF
     ? updateComment(repo, existing.commentId, body, { cwd, spawnSyncFn })
     : createComment(repo, pr, body, { cwd, spawnSyncFn });
   if (posted.error || posted.status !== 0) {
-    const detail = posted.stderr || (posted.error && posted.error.message) || 'unknown error';
-    return { ok: false, error: `申告表コメントの投稿に失敗しました: ${String(detail).trim()}` };
+    const detail = ghErrorDetail(posted, { fallback: 'unknown error' });
+    return { ok: false, error: `申告表コメントの投稿に失敗しました: ${detail}` };
   }
   let url = '';
   try {

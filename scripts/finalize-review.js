@@ -509,7 +509,6 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
     // 長文の不完全レビューコメントで Windows の argv 上限に当たらないよう、共有ヘルパー経由で --body-file - と stdin を使って投稿する。
     const ghResult = createPrComment(repo, pr, commentBody, {
       ghForTest: _ghForTest,
-      respectTestContextGuard: true,
     });
 
     if (ghResult && ghResult.status === 0) {

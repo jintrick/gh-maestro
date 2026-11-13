@@ -816,7 +816,7 @@ test('declareTestResult: 既定実装は 32KB超の日本語を含む本文で�
     assert.ok(writeCall, `${mode}: -F body=@- で gh api を呼ぶ`);
     const expectedArgs = mode === 'create'
       ? ['api', 'repos/owner/repo/issues/42/comments', '-X', 'POST', '-F', 'body=@-']
-      : ['api', '-X', 'PATCH', 'repos/owner/repo/issues/comments/777', '-F', 'body=@-'];
+      : ['api', 'repos/owner/repo/issues/comments/777', '-X', 'PATCH', '-F', 'body=@-'];
     assert.deepEqual(writeCall.args, expectedArgs);
     assert.ok(writeCall.args.join(' ').length < 256, 'argv に長文本文を含めない');
     assert.equal(writeCall.opts.encoding, 'utf8');

@@ -46,12 +46,11 @@ function runGhWithBody(args, body, opts = {}) {
  * @param {string} endpoint - GitHub REST API エンドポイント
  * @param {string} body - stdin（`-F body=@-`）へ渡す本文
  * @param {string[]} [extraArgs=[]] - API フィールド等の追加引数
- * @param {object} [opts={}] - `method`（既定 `'POST'`）、`methodBeforeEndpoint`、`spawnSyncFn` 等のオプション
+ * @param {object} [opts={}] - `method`（既定 `'POST'`）、`spawnSyncFn` 等のオプション
  */
 function ghApiWithBody(endpoint, body, extraArgs = [], opts = {}) {
-  const { method = 'POST', methodBeforeEndpoint = false, ...restOpts } = opts;
-  const targetArgs = methodBeforeEndpoint ? ['-X', method, endpoint] : [endpoint, '-X', method];
-  return runGhWithBody(['api', ...targetArgs, '-F', 'body=@-', ...extraArgs], body, restOpts);
+  const { method = 'POST', ...restOpts } = opts;
+  return runGhWithBody(['api', endpoint, '-X', method, '-F', 'body=@-', ...extraArgs], body, restOpts);
 }
 
 /**
@@ -60,17 +59,17 @@ function ghApiWithBody(endpoint, body, extraArgs = [], opts = {}) {
  * @param {string} repo - `owner/repo`
  * @param {number|string} pr - PR 番号
  * @param {string} body - コメント本文（stdin 経由）
- * @param {object} [opts={}] - `ghForTest`, `respectTestContextGuard`, `spawnSyncFn` 等
+ * @param {object} [opts={}] - `ghForTest`, `allowRealGhInTest`（既定 false で `NODE_TEST_CONTEXT` 下は投稿抑止）, `spawnSyncFn` 等
  * @returns {{ status: number|null, stdout: string, stderr: string, error?: Error }}
  */
 function createPrComment(repo, pr, body, opts = {}) {
-  const { ghForTest, respectTestContextGuard = false, ...restOpts } = opts;
+  const { ghForTest, allowRealGhInTest = false, ...restOpts } = opts;
   const ghArgs = ['pr', 'comment', String(pr), '--repo', repo, '--body-file', '-'];
   const ghOpts = { encoding: 'utf8', stdio: 'pipe', timeout: GH_TIMEOUT_MS, ...restOpts, input: String(body ?? '') };
   if (ghForTest) {
     return ghForTest(ghArgs, ghOpts);
   }
-  if (respectTestContextGuard && process.env.NODE_TEST_CONTEXT) {
+  if (!allowRealGhInTest && process.env.NODE_TEST_CONTEXT) {
     return { status: 1, stdout: '', stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません' };
   }
   try {
@@ -106,7 +105,6 @@ let _updateComment = (repo, commentId, body, opts = {}) => {
   return ghApiWithBody(`repos/${repo}/issues/comments/${commentId}`, body, [], {
     ...opts,
     method: 'PATCH',
-    methodBeforeEndpoint: true,
   });
 };
 

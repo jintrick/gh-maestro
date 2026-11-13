@@ -91,7 +91,7 @@ test('slow: declare-test-result.js は実プロセス境界で 32KB超の日本�
           stdout: JSON.stringify({ html_url: 'https://github.com/owner/repo/pull/42#issuecomment-10' }),
         },
         {
-          match: { prefix: ['api', '-X', 'PATCH', 'repos/owner/repo/issues/comments/10'] },
+          match: { prefix: ['api', 'repos/owner/repo/issues/comments/10', '-X', 'PATCH'] },
           action: 'append-body-file',
           bodyFlag: '-F',
           stateFile,
@@ -158,7 +158,7 @@ test('slow: pr-declaration.js は実プロセス境界で約98KBの日本語申�
           stdout: JSON.stringify({ html_url: 'https://github.com/owner/repo/pull/5#issuecomment-77' }),
         },
         {
-          match: { prefix: ['api', '-X', 'PATCH', 'repos/owner/repo/issues/comments/77'] },
+          match: { prefix: ['api', 'repos/owner/repo/issues/comments/77', '-X', 'PATCH'] },
           action: 'append-body-file',
           bodyFlag: '-F',
           stateFile,
@@ -227,7 +227,7 @@ test('slow: publish-plan.js は実プロセス境界で 32KB超の日本語計�
           stdout: '',
         },
         {
-          match: { prefix: ['api', '-X', 'PATCH', 'repos/owner/repo/issues/comments/500'] },
+          match: { prefix: ['api', 'repos/owner/repo/issues/comments/500', '-X', 'PATCH'] },
           action: 'append-body-file',
           bodyFlag: '-F',
           stateFile,

@@ -958,7 +958,6 @@ function notifyManifestProblem({ workspace, pr, repo, commentBody, failureLabel,
   // 長文の通知コメントで Windows の argv 上限に当たらないよう、共有ヘルパー経由で --body-file - と stdin を使って投稿する。
   const result = createPrComment(repo, notifyPr, commentBody, {
     ghForTest: _ghForTest,
-    respectTestContextGuard: true,
   });
 
   if (result && result.status === 0) {

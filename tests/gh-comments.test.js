@@ -142,7 +142,7 @@ test('createComment / updateComment: 32KB超の日本語本文を argv に載せ
   assert.equal(calls[0].cmd, 'gh');
   assert.deepEqual(calls[0].args, ['api', 'repos/owner/repo/issues/42/comments', '-X', 'POST', '-F', 'body=@-']);
   assert.equal(calls[1].cmd, 'gh');
-  assert.deepEqual(calls[1].args, ['api', '-X', 'PATCH', 'repos/owner/repo/issues/comments/999', '-F', 'body=@-']);
+  assert.deepEqual(calls[1].args, ['api', 'repos/owner/repo/issues/comments/999', '-X', 'PATCH', '-F', 'body=@-']);
   for (const call of calls) {
     assert.ok(call.args.join(' ').length < 256, '本文をコマンドライン引数に含めない');
     assert.equal(call.opts.encoding, 'utf8');
@@ -187,9 +187,21 @@ test('ghApiWithBody: endpoint・extraArgs・stdin・共通 timeout を組み立�
   assert.equal(calls[0].opts.input, '指摘本文');
 });
 
-test('createPrComment / ghErrorDetail: PRコメントを stdin 経由で投稿し、stderr 空時は error.message を返す', () => {
+test('createPrComment / ghErrorDetail: NODE_TEST_CONTEXT 既定ガードと allowRealGhInTest による stdin 投稿を検証する', () => {
+  const blockedCalls = [];
+  const blocked = ghComments.createPrComment('o/r', 15, '本文', {
+    spawnSyncFn: (...args) => {
+      blockedCalls.push(args);
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /NODE_TEST_CONTEXT/);
+  assert.equal(blockedCalls.length, 0, '既定では NODE_TEST_CONTEXT 下で spawnSync を呼ばない');
+
   const calls = [];
   const ok = ghComments.createPrComment('o/r', 15, 'PRコメント本文', {
+    allowRealGhInTest: true,
     spawnSyncFn: (cmd, args, opts) => {
       calls.push({ cmd, args, opts });
       return { status: 0, stdout: 'https://github.com/o/r/pull/15#issuecomment-1\n', stderr: '' };
@@ -203,11 +215,8 @@ test('createPrComment / ghErrorDetail: PRコメントを stdin 経由で投稿�
   assert.equal(calls[0].opts.stdio, 'pipe');
   assert.equal(calls[0].opts.input, 'PRコメント本文');
 
-  const blocked = ghComments.createPrComment('o/r', 15, '本文', { respectTestContextGuard: true });
-  assert.equal(blocked.status, 1);
-  assert.match(blocked.stderr, /NODE_TEST_CONTEXT/);
-
   const epipe = ghComments.createPrComment('o/r', 15, '本文', {
+    allowRealGhInTest: true,
     spawnSyncFn: () => ({ status: null, stdout: '', stderr: '', error: new Error('write EPIPE') }),
   });
   assert.equal(epipe.stderr, 'write EPIPE');

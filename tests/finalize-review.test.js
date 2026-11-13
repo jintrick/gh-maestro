@@ -510,7 +510,7 @@ function loadFinalizeReviewWithSpawn(fakeSpawnSync) {
   }
 }
 
-test('finalizeReview(incomplete): 実 child-process 境界で 32KB超の日本語コメントを --body-file - と stdin で渡し argv へ載せない', async () => {
+test('finalizeReview(incomplete): 注入した child-process モック境界で 32KB超の日本語コメントの argv/stdin 組み立てを検証する', async () => {
   await withTempDir('fr-large-', async (tmpDir) => {
     const savedTestCtx = process.env.NODE_TEST_CONTEXT;
     try {

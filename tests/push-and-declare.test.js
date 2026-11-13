@@ -268,7 +268,7 @@ const m = {
   prCreate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create',
   commentList: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '--method' && args[2] === 'GET',
   commentCreate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/${'5'}/comments` && args[2] === '-X' && args[3] === 'POST' && args[4] === '-F' && args[5] === 'body=@-',
-  commentUpdate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH',
+  commentUpdate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && /^repos\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(args[1] || '') && args[2] === '-X' && args[3] === 'PATCH' && args[4] === '-F' && args[5] === 'body=@-',
 };
 
 /** 変更あり → コミット → push → PR新規作成 → 申告 のフルパス用ハンドラ。 */
@@ -689,7 +689,7 @@ test('冪等性: 同じ状態に対して2回実行しても新たなコミッ�
   // 申告は壊れない: 1回目は新規投稿、2回目は同じHEADに対して既存申告の更新（PATCH）が行われる
   assert.equal(state.comments.length, 1, '申告コメントが重複して増えない');
   const createCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && c.args[1] === `repos/${REPO}/issues/${'5'}/comments` && c.args[2] === '-X' && c.args[3] === 'POST' && c.args[4] === '-F' && c.args[5] === 'body=@-').length;
-  const updateCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && c.args[1] === '-X' && c.args[2] === 'PATCH').length;
+  const updateCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && /^repos\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(c.args[1] || '') && c.args[2] === '-X' && c.args[3] === 'PATCH' && c.args[4] === '-F' && c.args[5] === 'body=@-').length;
   assert.equal(createCount, 1, '申告コメントは1回目で1回新規投稿される');
   assert.equal(updateCount, 1, '2回目は既存申告を更新する（重複投稿しない）');
   assert.match(second.stdout, /申告: https:\/\/github.com\/owner\/repo\/pull\/5#issuecomment-\d+（対象コミット 0123456789/);
@@ -891,7 +891,7 @@ test('main: NODE_TEST_CONTEXT 環境下では実副作用を実行せず拒否�
 const DECLARATION_TABLE = '| テスト | 何が壊れたら失敗するか | 期待値の出所 | 変異確認（実施結果／未実施の欠陥・理由） |\n|---|---|---|---|\n| t1 | 欠陥X | Issue要件 | 未実施（範囲外）: 欠陥X; 直接比較しており、欠陥Xならアサーションが失敗するため |';
 const DECLARATION_MARKER_LINE = `<!-- gh-maestro:pr-declaration head=${SHA} -->`;
 const isCommentCreate = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/5/comments` && args[2] === '-X' && args[3] === 'POST' && args[4] === '-F' && args[5] === 'body=@-';
-const isCommentPatch = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH';
+const isCommentPatch = (cmd, args) => cmd === 'gh' && args[0] === 'api' && /^repos\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(args[1] || '') && args[2] === '-X' && args[3] === 'PATCH' && args[4] === '-F' && args[5] === 'body=@-';
 
 test('buildPrBody は申告表に関係なく関連Issue行のみを返す（PR本文は変更しない）', () => {
   const { mod } = loadModule();
@@ -938,7 +938,7 @@ test('--declaration-file: 同じHEADの信頼される既存申告表コメン�
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
   const patch = call(calls, (cmd, args) => isCommentPatch(cmd, args));
   assert.ok(patch, '既存コメントを PATCH で更新する');
-  assert.equal(patch.args[3], 'repos/owner/repo/issues/comments/77');
+  assert.equal(patch.args[1], 'repos/owner/repo/issues/comments/77');
   assert.equal(calls.find(c => isCommentCreate(c.cmd, c.args) && String((c.opts && c.opts.input) || '').includes('gh-maestro:pr-declaration')), undefined, '申告表を新規投稿しない');
 });
 
@@ -1030,7 +1030,7 @@ function commentStateHandlers({ confirmed = true, createOk = true } = {}) {
       },
     },
     {
-      matches: ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH',
+      matches: ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && /^repos\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(args[1] || '') && args[2] === '-X' && args[3] === 'PATCH' && args[4] === '-F' && args[5] === 'body=@-',
       result: () => {
         posted = true;
         return { status: 0, stdout: `{"html_url":"${DECL_URL}"}` };

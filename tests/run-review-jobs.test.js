@@ -1924,7 +1924,7 @@ function loadRunReviewJobsWithSpawn(fakeSpawnSync) {
   }
 }
 
-test('notifyManifestProblem: 実 child-process 境界で 32KB超の日本語通知本文を --body-file - と stdin で渡し argv へ載せない', () => {
+test('notifyManifestProblem: 注入した child-process モック境界で 32KB超の日本語通知本文の argv/stdin 組み立てを検証する', () => {
   withTempDir('nmp-large-', (testDir) => {
     const savedTestCtx = process.env.NODE_TEST_CONTEXT;
     try {

@@ -299,7 +299,7 @@ test('publishPlan: 既定実装は 32KB超の日本語を含む計画本文で�
     assert.ok(writeCall, `${mode}: -F body=@- でコメント投稿/更新を行う`);
     const expectedArgs = mode === 'create'
       ? ['api', 'repos/owner/repo/issues/42/comments', '-X', 'POST', '-F', 'body=@-']
-      : ['api', '-X', 'PATCH', 'repos/owner/repo/issues/comments/999', '-F', 'body=@-'];
+      : ['api', 'repos/owner/repo/issues/comments/999', '-X', 'PATCH', '-F', 'body=@-'];
     assert.deepEqual(writeCall.args, expectedArgs);
     assert.ok(writeCall.args.join(' ').length < 256, 'argv に長文計画を含めない');
     assert.equal(writeCall.opts.encoding, 'utf8');
