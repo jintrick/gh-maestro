@@ -203,6 +203,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 - **7-[4/6] 修正push後の事実確認【必須】**
 - **7-[5/6] マージ判断を依頼【必須】**
 - **7-[6/6] 誤ってマージした場合【任意】**
+理由と経緯: docs/adr/0062-review-decisions-recorded-in-threads.md
 
 ### 8. 本番公開（CI/CD）確認【必須】
 <!-- gh-maestro-structure: middle-items=2 -->
