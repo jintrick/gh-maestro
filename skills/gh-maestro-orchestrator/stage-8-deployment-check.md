@@ -25,4 +25,4 @@ gh run list --repo $REPO --branch $BASE_BRANCH --limit 1
 - `failure` / `cancelled` / `timed_out`: `gh run view <run-id> --repo $REPO --log-failed` で失敗概要を取得し、その判断材料を示して人間に次の対応を尋ねてから工程9へ進む。
 - runなし: 工程9へ進む。
 
-この手順書は工程8で実行する内容の正本である。人間への発言はSKILL.md「人間への発言の規範」に従う。
+このスキル断片は工程8で実行する内容の正本である。人間への発言はSKILL.md「人間への発言の規範」に従う。
