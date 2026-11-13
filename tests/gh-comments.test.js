@@ -120,3 +120,52 @@ test('listComments: timeout を上書きできる', () => {
   ghComments.listComments('test/repo', 42, { timeout: 5000 });
   assert.equal(capturedOpts.timeout, 5000);
 });
+
+test('createComment / updateComment: 32KB超の日本語本文を argv に載せず -F body=@- と opts.input (UTF-8) で渡す', () => {
+  const largeBody = '日本語コメント本文-境界確認用。\n'.repeat(2500);
+  assert.ok(Buffer.byteLength(largeBody, 'utf8') > 32768, 'テスト前提: 32KB超の日本語本文');
+
+  const calls = [];
+  ghComments._setSpawnSync((cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    return { status: 0, stdout: '{"id":1,"html_url":"https://example.test/1"}' };
+  });
+
+  try {
+    ghComments.createComment('owner/repo', 42, largeBody, { cwd: '/tmp/ws' });
+    ghComments.updateComment('owner/repo', 999, largeBody, { cwd: '/tmp/ws' });
+  } finally {
+    ghComments._setSpawnSync(require('../scripts/shared/child-process').spawnSync);
+  }
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].cmd, 'gh');
+  assert.deepEqual(calls[0].args, ['api', 'repos/owner/repo/issues/42/comments', '-X', 'POST', '-F', 'body=@-']);
+  assert.equal(calls[1].cmd, 'gh');
+  assert.deepEqual(calls[1].args, ['api', '-X', 'PATCH', 'repos/owner/repo/issues/comments/999', '-F', 'body=@-']);
+  for (const call of calls) {
+    assert.ok(call.args.join(' ').length < 256, '本文をコマンドライン引数に含めない');
+    assert.equal(call.opts.encoding, 'utf8');
+    assert.equal(call.opts.timeout, 30000);
+    assert.equal(call.opts.cwd, '/tmp/ws');
+    assert.equal(call.opts.input, largeBody);
+  }
+});
+
+test('createComment / updateComment: opts.spawnSyncFn が指定されたら既定 _spawnSync より優先して使用する', () => {
+  const customCalls = [];
+  ghComments._setSpawnSync(() => { throw new Error('既定の _spawnSync は呼ばれない'); });
+  try {
+    ghComments.createComment('o/r', 5, '本文A', {
+      spawnSyncFn: (cmd, args, opts) => { customCalls.push({ cmd, args, opts }); return { status: 0, stdout: '{}' }; },
+    });
+    ghComments.updateComment('o/r', 77, '本文B', {
+      spawnSyncFn: (cmd, args, opts) => { customCalls.push({ cmd, args, opts }); return { status: 0, stdout: '{}' }; },
+    });
+  } finally {
+    ghComments._setSpawnSync(require('../scripts/shared/child-process').spawnSync);
+  }
+  assert.equal(customCalls.length, 2);
+  assert.equal(customCalls[0].opts.input, '本文A');
+  assert.equal(customCalls[1].opts.input, '本文B');
+});

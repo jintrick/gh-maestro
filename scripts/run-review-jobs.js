@@ -954,16 +954,18 @@ function notifyManifestProblem({ workspace, pr, repo, commentBody, failureLabel,
     return { notifiable: true, skipped: true, posted: false, commentUrl: null, error: null, sentinelPath };
   }
 
-  const ghArgs = ['pr', 'comment', notifyPr, '--repo', repo, '--body', commentBody];
+  // 長文の通知コメントで Windows の argv 上限に当たらないよう --body-file - と stdin で渡す。
+  const ghArgs = ['pr', 'comment', notifyPr, '--repo', repo, '--body-file', '-'];
+  const ghOpts = { encoding: 'utf8', stdio: 'pipe', input: String(commentBody ?? '') };
 
   let result;
   if (_ghForTest) {
-    result = _ghForTest(ghArgs);
+    result = _ghForTest(ghArgs, ghOpts);
   } else if (process.env.NODE_TEST_CONTEXT) {
     result = { status: 1, stdout: '', stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません' };
   } else {
-    const r = spawnSync('gh', ghArgs, { encoding: 'utf8', stdio: 'pipe' });
-    result = { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+    const r = spawnSync('gh', ghArgs, ghOpts);
+    result = { status: r.status, stdout: r.stdout || '', stderr: r.stderr || (r.error ? r.error.message : '') };
   }
 
   if (result.status === 0) {

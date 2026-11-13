@@ -11,6 +11,7 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 const processLiveness = require('../scripts/shared/process-liveness');
+const { withTempDir } = require('../scripts/shared/temp-directory');
 
 const { cleanSpawnEnv } = require('./_spawn-env');
 
@@ -787,8 +788,8 @@ test('notifyManifestValidationFailure: gh投稿（注入）とセンチネル作
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvmf-'));
   try {
     const ghCalls = [];
-    _setGhForTest((args) => {
-      ghCalls.push(args);
+    _setGhForTest((args, opts) => {
+      ghCalls.push({ args, opts });
       return { status: 0, stdout: 'https://github.com/owner/repo/pull/42#issuecomment-1\n' };
     });
 
@@ -811,15 +812,12 @@ test('notifyManifestValidationFailure: gh投稿（注入）とセンチネル作
       delete process.env.NODE_TEST_CONTEXT;
     }
 
-    // gh pr comment が正しい引数で呼ばれた
+    // gh pr comment が正しい引数と stdin で呼ばれた
     assert.equal(ghCalls.length, 1);
-    const args = ghCalls[0];
-    assert.equal(args[0], 'pr');
-    assert.equal(args[1], 'comment');
-    assert.equal(args[2], '42');
-    assert.equal(args[3], '--repo');
-    assert.equal(args[4], 'owner/repo');
-    assert.ok(args.includes('--body'), 'gh args should include --body');
+    const { args, opts } = ghCalls[0];
+    assert.deepEqual(args, ['pr', 'comment', '42', '--repo', 'owner/repo', '--body-file', '-']);
+    assert.equal(opts.encoding, 'utf8');
+    assert.ok(typeof opts.input === 'string' && opts.input.includes('leaf x is missing from coverage_ledger'));
   } finally {
     _setGhForTest(null);
     fs.rmSync(testDir, { recursive: true, force: true });
@@ -1127,7 +1125,7 @@ test('runJobsFromManifest: パース不能JSONでも通知投稿＋成功セン�
     fs.writeFileSync(manifestPath, '{"pr": 42, "repo": "o/r", "jobs": [', 'utf8');
 
     const ghCalls = [];
-    _setGhForTest((args) => { ghCalls.push(args); return { status: 0, stdout: 'https://github.com/o/r/pull/42#issuecomment-2\n' }; });
+    _setGhForTest((args, opts) => { ghCalls.push({ args, opts }); return { status: 0, stdout: 'https://github.com/o/r/pull/42#issuecomment-2\n' }; });
     process.env.NODE_TEST_CONTEXT = '1';
     try {
       const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
@@ -1138,11 +1136,11 @@ test('runJobsFromManifest: パース不能JSONでも通知投稿＋成功セン�
       assert.equal(result.summary.notification.notifiable, true);
       // 通知先は CLI --pr / --repo が使われる（manifestは読めないため manifest.pr/repo はない）
       assert.equal(ghCalls.length, 1);
-      assert.equal(ghCalls[0][2], '42');
-      assert.equal(ghCalls[0][4], 'o/r');
+      assert.equal(ghCalls[0].args[2], '42');
+      assert.equal(ghCalls[0].args[4], 'o/r');
       // SyntaxError のメッセージ（V8のバリエーション: Unexpected token / in JSON at position /
       // Unexpected end of JSON input）と manifest パスが本文に載る
-      const body = ghCalls[0][ghCalls[0].indexOf('--body') + 1];
+      const body = ghCalls[0].opts.input;
       assert.match(body, /JSONを解析できませんでした/);
       assert.match(body, /Unexpected token|in JSON at position|Unexpected end of JSON input/);
       assert.ok(body.includes(manifestPath), '本文にmanifestパスを含める');
@@ -1223,7 +1221,7 @@ test('runJobsFromManifest: manifest読み込み失敗も通知投稿＋センチ
     const resultsPath = path.join(testDir, 'results.json');
 
     const ghCalls = [];
-    _setGhForTest((args) => { ghCalls.push(args); return { status: 0, stdout: 'url\n' }; });
+    _setGhForTest((args, opts) => { ghCalls.push({ args, opts }); return { status: 0, stdout: 'url\n' }; });
     process.env.NODE_TEST_CONTEXT = '1';
     try {
       const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
@@ -1231,7 +1229,7 @@ test('runJobsFromManifest: manifest読み込み失敗も通知投稿＋センチ
       assert.ok(result.summary.error.includes('manifest read failed'), `summary.error: ${result.summary.error}`);
       assert.equal(result.summary.notification.posted, true);
       assert.equal(ghCalls.length, 1);
-      const body = ghCalls[0][ghCalls[0].indexOf('--body') + 1];
+      const body = ghCalls[0].opts.input;
       assert.match(body, /読み込めませんでした/);
       assert.ok(body.includes(manifestPath), '本文にmanifestパスを含める');
       assert.equal(JSON.parse(fs.readFileSync(result.summary.notification.sentinelPath, 'utf8')).reason, 'incomplete-review');
@@ -1905,4 +1903,55 @@ test('runJobsFromManifest: 取得した申告表は実際に組み立てられ�
     _setSpawn(null);
     scope.cleanup();
   }
+});
+
+function loadRunReviewJobsWithSpawn(fakeSpawnSync) {
+  const cpPath = require.resolve('../scripts/shared/child-process');
+  const rrjPath = require.resolve('../scripts/run-review-jobs');
+  const savedCp = require.cache[cpPath];
+  const savedRrj = require.cache[rrjPath];
+  require.cache[cpPath] = { id: cpPath, filename: cpPath, loaded: true, exports: { spawn: () => {}, spawnSync: fakeSpawnSync } };
+  delete require.cache[rrjPath];
+  try {
+    return require(rrjPath);
+  } finally {
+    if (savedCp) require.cache[cpPath] = savedCp; else delete require.cache[cpPath];
+    if (savedRrj) require.cache[rrjPath] = savedRrj; else delete require.cache[rrjPath];
+  }
+}
+
+test('notifyManifestProblem: 実 child-process 境界で 32KB超の日本語通知本文を --body-file - と stdin で渡し argv へ載せない', () => {
+  withTempDir('nmp-large-', (testDir) => {
+    const savedTestCtx = process.env.NODE_TEST_CONTEXT;
+    try {
+      const largeJapaneseBody = '不完全レビュー通知（日本語詳細）:\n' + 'マニフェスト検証エラー詳細行。\n'.repeat(1200);
+      assert.ok(Buffer.byteLength(largeJapaneseBody, 'utf8') > 32768, 'テスト前提: 32KB超の日本語通知本文');
+
+      const calls = [];
+      const fresh = loadRunReviewJobsWithSpawn((cmd, args, opts) => {
+        calls.push({ cmd, args, opts });
+        return { status: 0, stdout: 'https://github.com/o/r/pull/42#issuecomment-888\n', stderr: '' };
+      });
+
+      delete process.env.NODE_TEST_CONTEXT;
+      const res = fresh.notifyManifestProblem({
+        workspace: testDir,
+        pr: 42,
+        repo: 'o/r',
+        commentBody: largeJapaneseBody,
+        failureLabel: '検証失敗',
+        failureDetail: '詳細',
+      });
+
+      assert.equal(res.posted, true);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cmd, 'gh');
+      assert.deepEqual(calls[0].args, ['pr', 'comment', '42', '--repo', 'o/r', '--body-file', '-']);
+      assert.ok(calls[0].args.join(' ').length < 256, 'argv に長文通知を含めない');
+      assert.equal(calls[0].opts.encoding, 'utf8');
+      assert.equal(calls[0].opts.input, largeJapaneseBody);
+    } finally {
+      if (savedTestCtx !== undefined) process.env.NODE_TEST_CONTEXT = savedTestCtx;
+    }
+  });
 });

@@ -1,9 +1,12 @@
 'use strict';
-// gh-comments.js — GitHub Issue/PR のコメント一覧を全件取得する共通ヘルパー
+// gh-comments.js — GitHub Issue/PR のコメント取得・投稿・更新を行う共通ヘルパー
 //
-// 背景: プロジェクト内の複数スクリプトが、gh api --paginate --slurp でコメント一覧を
-// 取得し平坦化する同一の処理を独立に実装していた（Issue #183）。本モジュールに
-// 集約することで重複を排除する。
+// 背景:
+// - プロジェクト内の複数スクリプトが、gh api --paginate --slurp でコメント一覧を
+//   取得し平坦化する同一の処理を独立に実装していた（Issue #183）。
+// - また、コメント本文を `-f body=${body}` としてコマンドライン引数で渡すと、Windows の
+//   argv 長上限（約32KB）で ENAMETOOLONG になる（Issue #774）。本文は `-F body=@-` と
+//   stdin（opts.input）経由で渡すことで上限を回避する。
 //
 // 各呼び出し元は、このモジュールの戻り値に基づいて独自のエラーハンドリング
 // （GraphQLフォールバック・エラー時continue等）を実装する。本モジュールは
@@ -19,6 +22,30 @@ let _listComments = (repo, issue, opts = {}) => {
   if (since) args.push('-f', `since=${since}`);
   if (per_page) args.push('-f', `per_page=${per_page}`);
   return _spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, ...restOpts });
+};
+
+/**
+ * 本文を標準入力経由（`-F body=@-`）で送信する共通のコメント書き込みプリミティブ。
+ * コマンドライン引数の長さ上限（Windows 約32KB）を避けるため、本文は必ず `input` に載せる。
+ */
+function postCommentApi(args, body, opts = {}) {
+  const { spawnSyncFn, ...restOpts } = opts;
+  const spawnFn = spawnSyncFn || _spawnSync;
+  return spawnFn('gh', args, {
+    encoding: 'utf8',
+    timeout: GH_TIMEOUT_MS,
+    ...restOpts,
+    // undefined だと spawnSync が stdin を継承し、@- 読み込みがハングしうるため必ず文字列化する。
+    input: String(body ?? ''),
+  });
+}
+
+let _createComment = (repo, issue, body, opts = {}) => {
+  return postCommentApi(['api', `repos/${repo}/issues/${issue}/comments`, '-X', 'POST', '-F', 'body=@-'], body, opts);
+};
+
+let _updateComment = (repo, commentId, body, opts = {}) => {
+  return postCommentApi(['api', '-X', 'PATCH', `repos/${repo}/issues/comments/${commentId}`, '-F', 'body=@-'], body, opts);
 };
 
 /**
@@ -41,6 +68,8 @@ function parseCommentsResponse(stdout) {
 
 module.exports = {
   listComments: (repo, issue, opts) => _listComments(repo, issue, opts || {}),
+  createComment: (repo, issue, body, opts) => _createComment(repo, issue, body, opts || {}),
+  updateComment: (repo, commentId, body, opts) => _updateComment(repo, commentId, body, opts || {}),
   parseCommentsResponse,
   _setListComments: (fn) => { _listComments = fn; },
   _setSpawnSync: (fn) => { _spawnSync = fn; },

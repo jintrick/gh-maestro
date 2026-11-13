@@ -205,7 +205,8 @@ function formatFinalReviewBody({ posted, unresolved, rejected }) {
 function runRequired(command, args, opts = {}, spawnFn = spawnSync) {
   const result = spawnFn(command, args, { encoding: 'utf8', ...opts });
   if (result.status !== 0) {
-    throw new Error(`${command} ${args.join(' ')} failed: ${(result.stderr || result.stdout || '').trim()}`);
+    const detail = (result.stderr || result.stdout || (result.error && result.error.message) || '').trim();
+    throw new Error(`${command} ${args.join(' ')} failed: ${detail}`);
   }
   return result.stdout;
 }
@@ -214,39 +215,53 @@ function loadFileAtCommit(headRefOid, filePath, cwd) {
   return runRequired('git', ['show', `${headRefOid}:${filePath}`], { cwd });
 }
 
-function postInlineComment(payload, finding, spawnFn = spawnSync) {
+/**
+ * 長文の本文が Windows の argv 上限に当たらないよう、body は `-F body=@-` と stdin 経由で渡す。
+ */
+function postGhApiWithBody(endpoint, body, extraArgs, spawnFn = spawnSync) {
   runRequired('gh', [
     'api',
-    `repos/${payload.repo}/pulls/${payload.pr}/comments`,
+    endpoint,
     '-X', 'POST',
-    '-f', `body=${formatFindingBody(finding, finding.review_finding_marker)}`,
-    '-f', `commit_id=${payload.headRefOid}`,
-    '-f', `path=${finding.path}`,
-    '-F', `line=${finding.resolved_line}`,
-    '-f', 'side=RIGHT',
-  ], {}, spawnFn);
+    '-F', 'body=@-',
+    ...extraArgs,
+  ], { input: String(body ?? '') }, spawnFn);
+}
+
+function postInlineComment(payload, finding, spawnFn = spawnSync) {
+  postGhApiWithBody(
+    `repos/${payload.repo}/pulls/${payload.pr}/comments`,
+    formatFindingBody(finding, finding.review_finding_marker),
+    [
+      '-f', `commit_id=${payload.headRefOid}`,
+      '-f', `path=${finding.path}`,
+      '-F', `line=${finding.resolved_line}`,
+      '-f', 'side=RIGHT',
+    ],
+    spawnFn
+  );
 }
 
 function postFileComment(payload, item, spawnFn = spawnSync) {
-  runRequired('gh', [
-    'api',
+  postGhApiWithBody(
     `repos/${payload.repo}/pulls/${payload.pr}/comments`,
-    '-X', 'POST',
-    '-f', `body=${formatFileFinding(item, item.finding.review_finding_marker)}`,
-    '-f', `commit_id=${payload.headRefOid}`,
-    '-f', `path=${item.finding.path}`,
-    '-f', 'subject_type=file',
-  ], {}, spawnFn);
+    formatFileFinding(item, item.finding.review_finding_marker),
+    [
+      '-f', `commit_id=${payload.headRefOid}`,
+      '-f', `path=${item.finding.path}`,
+      '-f', 'subject_type=file',
+    ],
+    spawnFn
+  );
 }
 
 function postFinalReview(payload, body, spawnFn = spawnSync) {
-  runRequired('gh', [
-    'api',
+  postGhApiWithBody(
     `repos/${payload.repo}/pulls/${payload.pr}/reviews`,
-    '-X', 'POST',
-    '-f', `body=${body}`,
-    '-f', 'event=COMMENT',
-  ], {}, spawnFn);
+    body,
+    ['-f', 'event=COMMENT'],
+    spawnFn
+  );
 }
 
 function processFindings(payload, options = {}) {

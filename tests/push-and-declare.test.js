@@ -267,7 +267,7 @@ const m = {
   prList: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'list',
   prCreate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create',
   commentList: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '--method' && args[2] === 'GET',
-  commentCreate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/${'5'}/comments` && args[2] === '-f',
+  commentCreate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/${'5'}/comments` && args[2] === '-X' && args[3] === 'POST' && args[4] === '-F' && args[5] === 'body=@-',
   commentUpdate: () => ({ cmd, args }) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH',
 };
 
@@ -349,11 +349,11 @@ test('Issue #577: coder手順のrun-tests後にpush-and-declareがfullとlintを
         0,
         `${explicitWorkspace ? '--workspace指定' : '省略'}のpush-and-declareが失敗しました: ${declaration.stderr}`,
       );
-      const comment = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+      const comment = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[4] === '-F' && args[5] === 'body=@-');
       assert.ok(comment, 'full/lintの申告コメントが投稿される');
-      assert.match(comment.args[3], /\*\*結果\*\*: pass/);
-      assert.match(comment.args[3], /\*\*lint\*\*: pass \(findings: 0\)/);
-      assert.match(comment.args[3], /\*\*full\*\*: pass/);
+      assert.match(comment.opts.input, /\*\*結果\*\*: pass/);
+      assert.match(comment.opts.input, /\*\*lint\*\*: pass \(findings: 0\)/);
+      assert.match(comment.opts.input, /\*\*full\*\*: pass/);
     }
   } finally {
     if (savedWorkspace === undefined) delete process.env.GH_MAESTRO_WORKSPACE;
@@ -404,12 +404,13 @@ function statefulHandlers(initial = {}) {
     { matches: m.commentCreate(), result: (c) => {
         const id = state.nextCommentId++;
         const htmlUrl = `https://github.com/owner/repo/pull/5#issuecomment-${id}`;
-        const body = String(c.args[3] || '').replace(/^body=/, '');
+        const body = String((c.opts && c.opts.input) || '');
         state.comments.push({ id, body, html_url: htmlUrl });
         return { status: 0, stdout: JSON.stringify({ html_url: htmlUrl }) };
       } },
-    { matches: m.commentUpdate(), result: () => {
+    { matches: m.commentUpdate(), result: (c) => {
         const last = state.comments[state.comments.length - 1];
+        if (c.opts && c.opts.input !== undefined) last.body = String(c.opts.input);
         return { status: 0, stdout: JSON.stringify({ html_url: last.html_url }) };
       } },
   ];
@@ -493,9 +494,9 @@ test('収束: 破損した成果物でも unknown 申告まで到達し、push/P
     false,
     '成果物が壊れていてもテストrunnerを補完実行しない',
   );
-  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[4] === '-F' && args[5] === 'body=@-');
   assert.ok(createCall, '破損成果物でも申告コメントを投稿する');
-  assert.match(createCall.args[3], /結果.*unknown/);
+  assert.match(createCall.opts.input, /結果.*unknown/);
   assert.match(result.stdout, /テスト証跡: unknown \/ unknown/);
 });
 
@@ -508,9 +509,9 @@ test('収束: 成果物が無い場合もunknown申告だけを行い、テス�
 
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
   assert.equal(calls.some(({ cmd }) => cmd === process.execPath), false);
-  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[2] === '-f');
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[4] === '-F' && args[5] === 'body=@-');
   assert.ok(createCall);
-  assert.match(createCall.args[3], /結果.*unknown/);
+  assert.match(createCall.opts.input, /結果.*unknown/);
 });
 
 test('収束: 宣言済みfull層の成果物が無い場合はpush後にexit 3で申告を拒否する', () => {
@@ -588,9 +589,9 @@ test('収束: 宣言済みfull層のcompleteなfail結果は既存照合を通�
   }, { commitContentHashFn: () => CONTENT_HASH, listTestLayersFn: listTestLayers }));
 
   assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
-  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[4] === '-F' && args[5] === 'body=@-');
   assert.ok(createCall, '既存の内容照合を通過した結果を申告する');
-  assert.match(createCall.args[3], /結果[\s\S]*full\*\*: fail \(fail: 3, pass: 9\)/);
+  assert.match(createCall.opts.input, /結果[\s\S]*full\*\*: fail \(fail: 3, pass: 9\)/);
 });
 
 test('収束: ステージ済み変更が無ければ空コミットを作らず、コミット段をスキップして push→申告で exit 0', () => {
@@ -687,7 +688,7 @@ test('冪等性: 同じ状態に対して2回実行しても新たなコミッ�
   assert.match(second.stdout, /PR: #5（既存を使用）/);
   // 申告は壊れない: 1回目は新規投稿、2回目は同じHEADに対して既存申告の更新（PATCH）が行われる
   assert.equal(state.comments.length, 1, '申告コメントが重複して増えない');
-  const createCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && c.args[1] === `repos/${REPO}/issues/${'5'}/comments` && c.args[2] === '-f').length;
+  const createCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && c.args[1] === `repos/${REPO}/issues/${'5'}/comments` && c.args[2] === '-X' && c.args[3] === 'POST' && c.args[4] === '-F' && c.args[5] === 'body=@-').length;
   const updateCount = calls.filter(c => c.cmd === 'gh' && c.args[0] === 'api' && c.args[1] === '-X' && c.args[2] === 'PATCH').length;
   assert.equal(createCount, 1, '申告コメントは1回目で1回新規投稿される');
   assert.equal(updateCount, 1, '2回目は既存申告を更新する（重複投稿しない）');
@@ -798,11 +799,11 @@ test('終了コード: テストが赤（fail>0）でも exit 0 で完走し、�
 
   assert.equal(result.exitCode, 0, '赤でも一連は完走して赤を申告する（関門を設けない）');
   // 申告本体（declareTestResult のコメント投稿）が失敗件数を載せている
-  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[4] === '-F' && args[5] === 'body=@-');
   assert.ok(createCall, '申告コメント投稿が呼ばれる');
-  assert.match(createCall.args[3], /結果[\s\S]*full\*\*: fail \(fail: 3, pass: 9\)/);
-  assert.match(createCall.args[3], /実行元.*test-runner/);
-  assert.match(createCall.args[3], /実行範囲.*aggregate/);
+  assert.match(createCall.opts.input, /結果[\s\S]*full\*\*: fail \(fail: 3, pass: 9\)/);
+  assert.match(createCall.opts.input, /実行元.*test-runner/);
+  assert.match(createCall.opts.input, /実行範囲.*aggregate/);
 });
 
 test('終了コード: lint findings があっても push と申告を完了する', () => {
@@ -814,9 +815,9 @@ test('終了コード: lint findings があっても push と申告を完了す�
   }, { commitContentHashFn: () => CONTENT_HASH }));
 
   assert.equal(result.exitCode, 0, 'lint findings は push/申告の停止条件ではない');
-  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[2] === '-f');
+  const createCall = call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[4] === '-F' && args[5] === 'body=@-');
   assert.ok(createCall, '申告コメント投稿が呼ばれる');
-  assert.match(createCall.args[3], /\*\*lint\*\*: findings \(findings: 2\)/);
+  assert.match(createCall.opts.input, /\*\*lint\*\*: findings \(findings: 2\)/);
 });
 
 // ── NODE_TEST_CONTEXT ガード（Issue #202 の構造的対策） ────────────────────────
@@ -889,7 +890,7 @@ test('main: NODE_TEST_CONTEXT 環境下では実副作用を実行せず拒否�
 
 const DECLARATION_TABLE = '| テスト | 何が壊れたら失敗するか | 期待値の出所 | 変異確認（実施結果／未実施の欠陥・理由） |\n|---|---|---|---|\n| t1 | 欠陥X | Issue要件 | 未実施（範囲外）: 欠陥X; 直接比較しており、欠陥Xならアサーションが失敗するため |';
 const DECLARATION_MARKER_LINE = `<!-- gh-maestro:pr-declaration head=${SHA} -->`;
-const isCommentCreate = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/5/comments` && args[2] === '-f';
+const isCommentCreate = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === `repos/${REPO}/issues/5/comments` && args[2] === '-X' && args[3] === 'POST' && args[4] === '-F' && args[5] === 'body=@-';
 const isCommentPatch = (cmd, args) => cmd === 'gh' && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH';
 
 test('buildPrBody は申告表に関係なく関連Issue行のみを返す（PR本文は変更しない）', () => {
@@ -914,8 +915,8 @@ test('--declaration-file: 未実施の変異確認を記した表も push 前に
   const postIndex = calls.findIndex(c => isCommentCreate(c.cmd, c.args));
   const pushIndex = calls.findIndex(c => c.cmd === 'git' && c.args[0] === 'push');
   assert.ok(postIndex >= 0 && postIndex < pushIndex, '申告表コメントは push より前に投稿されるべき');
-  const body = calls[postIndex].args[3];
-  assert.equal(body, `body=${DECLARATION_MARKER_LINE}\n${DECLARATION_TABLE}\n`);
+  const body = calls[postIndex].opts.input;
+  assert.equal(body, `${DECLARATION_MARKER_LINE}\n${DECLARATION_TABLE}\n`);
   assert.match(body, /未実施（範囲外）: 欠陥X;.*アサーションが失敗する/);
   assert.equal(call(calls, (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'edit'), undefined, 'PR本文を編集しない');
 });
@@ -938,7 +939,7 @@ test('--declaration-file: 同じHEADの信頼される既存申告表コメン�
   const patch = call(calls, (cmd, args) => isCommentPatch(cmd, args));
   assert.ok(patch, '既存コメントを PATCH で更新する');
   assert.equal(patch.args[3], 'repos/owner/repo/issues/comments/77');
-  assert.equal(call(calls, (cmd, args) => isCommentCreate(cmd, args) && args[3].includes('gh-maestro:pr-declaration')), undefined, '申告表を新規投稿しない');
+  assert.equal(calls.find(c => isCommentCreate(c.cmd, c.args) && String((c.opts && c.opts.input) || '').includes('gh-maestro:pr-declaration')), undefined, '申告表を新規投稿しない');
 });
 
 test('--declaration-file: 申告表コメントの投稿に失敗したら push 前なら exit 2（リモート未変更）', () => {

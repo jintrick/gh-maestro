@@ -12,11 +12,10 @@
 
 'use strict';
 
-const { spawnSync } = require('./shared/child-process');
 const { parseFlags } = require('./shared/workspace');
 const { resolveRepo } = require('./shared/repo');
 const { resolveGitHead } = require('./shared/git-head');
-const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { listComments, createComment, updateComment, parseCommentsResponse } = require('./shared/gh-comments');
 const {
   TEST_CONTENT_HASH_RE,
   calculateCommitContentHash,
@@ -71,13 +70,11 @@ let _ghListComments = (pr, repo, opts = {}) => {
 };
 
 let _ghCreateComment = (pr, repo, body, opts = {}) => {
-  return spawnSync('gh', ['api', `repos/${repo}/issues/${pr}/comments`,
-    '-f', `body=${body}`], { encoding: 'utf8', ...opts });
+  return createComment(repo, pr, body, opts);
 };
 
 let _ghUpdateComment = (commentId, repo, body, opts = {}) => {
-  return spawnSync('gh', ['api', '-X', 'PATCH', `repos/${repo}/issues/comments/${commentId}`,
-    '-f', `body=${body}`], { encoding: 'utf8', ...opts });
+  return updateComment(repo, commentId, body, opts);
 };
 
 function isKnownTestResult(testResult) {

@@ -506,15 +506,17 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
     let commentUrl = null;
     let commentError = null;
 
-    const ghArgs = ['pr', 'comment', String(pr), '--repo', repo, '--body', commentBody];
+    // 長文の不完全レビューコメントで Windows の argv 上限に当たらないよう --body-file - と stdin で渡す。
+    const ghArgs = ['pr', 'comment', String(pr), '--repo', repo, '--body-file', '-'];
+    const ghOpts = { encoding: 'utf8', stdio: 'pipe', input: String(commentBody ?? '') };
     let ghResult;
     if (_ghForTest) {
-      ghResult = _ghForTest(ghArgs);
+      ghResult = _ghForTest(ghArgs, ghOpts);
     } else if (process.env.NODE_TEST_CONTEXT) {
       ghResult = { status: 1, stdout: '', stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません' };
     } else {
       try {
-        ghResult = spawnSync('gh', ghArgs, { encoding: 'utf8', stdio: 'pipe' });
+        ghResult = spawnSync('gh', ghArgs, ghOpts);
       } catch (e) {
         ghResult = { status: 1, stdout: '', stderr: e.message };
       }

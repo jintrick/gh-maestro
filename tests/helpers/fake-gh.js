@@ -73,9 +73,10 @@ function runFixtureAction(fixture, args, config) {
     if (bodyIndex < 0 || typeof args[bodyIndex + 1] !== 'string') {
       return { status: 2, stdout: '', stderr: `fake gh fixture expected ${bodyFlag}\n` };
     }
-    const body = args[bodyIndex + 1] === '-'
+    const rawTarget = args[bodyIndex + 1];
+    const body = (rawTarget === '-' || rawTarget === 'body=@-')
       ? fs.readFileSync(0, 'utf8')
-      : fs.readFileSync(args[bodyIndex + 1], 'utf8');
+      : fs.readFileSync(rawTarget, 'utf8');
     const value = {
       ...(fixture.fields || {}),
       body,
