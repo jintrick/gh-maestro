@@ -6,16 +6,19 @@ const path = require('path');
 const { spawnSync } = require('./shared/child-process');
 const { parseJsonText } = require('./shared/json-file');
 const { reviewResultMarker } = require('./shared/review-result-marker');
+const { reviewFindingMarker } = require('./shared/review-finding-marker');
+const { parseFlags } = require('./shared/workspace');
 
 const USAGE = `review-publisher.js — RM finding JSONを検証し、PRレビューとして投稿する
 
-Usage: node review-publisher.js <findings-json> [--dry-run]
+Usage: node review-publisher.js <findings-json> [--dry-run] [--help]
 
 Arguments:
   <findings-json>  gh-maestro-reviewer RM が出力したJSON
 
 Options:
-  --dry-run        GitHubへ投稿せず、解決結果JSONをstdoutへ出力する`;
+  --dry-run        GitHubへ投稿せず、行／ファイル単位に分類した結果JSONをstdoutへ出力する
+  --help, -h       このヘルプを表示する`;
 
 const {
   VALID_ASPECTS,
@@ -168,21 +171,20 @@ function formatFindingHeading(finding) {
   return `${labels} ${severityLabel}: ${finding.summary}`;
 }
 
-function formatFindingBody(finding) {
-  return `${formatFindingHeading(finding)}
-判定根拠: ${finding.severity_rationale}
-
-${finding.body}`;
+function formatFindingBody(finding, marker) {
+  const lines = [formatFindingHeading(finding), `判定根拠: ${finding.severity_rationale}`, '', finding.body];
+  if (marker) lines.push('', marker);
+  return lines.join('\n');
 }
 
-function formatUnresolvedFinding({ finding, status, resolved_line }) {
+function formatFileFinding({ finding, status, resolved_line }, marker) {
   const lines = [
-    `### ${formatFindingHeading(finding)}`,
-    `- 対象パス: \`${finding.path}\``,
-    `- 位置解決状態: \`${status}\``,
+    formatFindingBody(finding),
+    '',
+    `位置に結び付けられなかったため、ファイル単位で投稿しました（${status}）。`,
   ];
-  if (resolved_line !== undefined) lines.push(`- 解決行: ${resolved_line}`);
-  lines.push(`判定根拠: ${finding.severity_rationale}`, '', finding.body);
+  if (resolved_line !== undefined) lines.push(`アンカー解決行: ${resolved_line}`);
+  if (marker) lines.push('', marker);
   return lines.join('\n');
 }
 
@@ -190,26 +192,18 @@ function formatFinalReviewBody({ posted, unresolved, rejected }) {
   const lines = [
     `Review Manager completed.`,
     `Posted inline findings: ${posted.length}`,
-    `Unposted findings (anchor unresolved): ${unresolved.length}`,
+    `Posted file-level findings: ${unresolved.length}`,
     `Rejected malformed findings: ${rejected.length}`,
   ];
   if (posted.length === 0 && unresolved.length === 0 && rejected.length === 0) {
     lines.push('');
     lines.push('3観点とも機械的な指摘なし。');
   }
-  if (unresolved.length) {
-    lines.push('');
-    lines.push('位置未解決finding:');
-    for (const item of unresolved) {
-      lines.push('');
-      lines.push(formatUnresolvedFinding(item));
-    }
-  }
   return lines.join('\n');
 }
 
-function runRequired(command, args, opts = {}) {
-  const result = spawnSync(command, args, { encoding: 'utf8', ...opts });
+function runRequired(command, args, opts = {}, spawnFn = spawnSync) {
+  const result = spawnFn(command, args, { encoding: 'utf8', ...opts });
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(' ')} failed: ${(result.stderr || result.stdout || '').trim()}`);
   }
@@ -220,27 +214,39 @@ function loadFileAtCommit(headRefOid, filePath, cwd) {
   return runRequired('git', ['show', `${headRefOid}:${filePath}`], { cwd });
 }
 
-function postInlineComment(payload, finding) {
+function postInlineComment(payload, finding, spawnFn = spawnSync) {
   runRequired('gh', [
     'api',
     `repos/${payload.repo}/pulls/${payload.pr}/comments`,
     '-X', 'POST',
-    '-f', `body=${formatFindingBody(finding)}`,
+    '-f', `body=${formatFindingBody(finding, finding.review_finding_marker)}`,
     '-f', `commit_id=${payload.headRefOid}`,
     '-f', `path=${finding.path}`,
     '-F', `line=${finding.resolved_line}`,
     '-f', 'side=RIGHT',
-  ]);
+  ], {}, spawnFn);
 }
 
-function postFinalReview(payload, body) {
+function postFileComment(payload, item, spawnFn = spawnSync) {
+  runRequired('gh', [
+    'api',
+    `repos/${payload.repo}/pulls/${payload.pr}/comments`,
+    '-X', 'POST',
+    '-f', `body=${formatFileFinding(item, item.finding.review_finding_marker)}`,
+    '-f', `commit_id=${payload.headRefOid}`,
+    '-f', `path=${item.finding.path}`,
+    '-f', 'subject_type=file',
+  ], {}, spawnFn);
+}
+
+function postFinalReview(payload, body, spawnFn = spawnSync) {
   runRequired('gh', [
     'api',
     `repos/${payload.repo}/pulls/${payload.pr}/reviews`,
     '-X', 'POST',
     '-f', `body=${body}`,
     '-f', 'event=COMMENT',
-  ]);
+  ], {}, spawnFn);
 }
 
 function processFindings(payload, options = {}) {
@@ -251,10 +257,10 @@ function processFindings(payload, options = {}) {
 
   const rejected = [];
   const candidates = [];
-  for (const finding of payload.findings) {
+  for (const [index, finding] of payload.findings.entries()) {
     const errors = validateFinding(finding);
     if (errors.length) rejected.push({ finding, errors });
-    else candidates.push(finding);
+    else candidates.push({ finding, finding_number: index + 1 });
   }
 
   const diffText = options.diffText ?? runRequired('gh', ['pr', 'diff', String(payload.pr), '--repo', payload.repo]);
@@ -264,23 +270,23 @@ function processFindings(payload, options = {}) {
   const unresolved = [];
 
   const fileCache = new Map();
-  for (const finding of candidates) {
+  for (const { finding, finding_number } of candidates) {
     try {
       if (!fileCache.has(finding.path)) {
         fileCache.set(finding.path, options.files?.[finding.path] ?? loadFileAtCommit(payload.headRefOid, finding.path, cwd));
       }
       const lineResult = resolveLineAnchor(fileCache.get(finding.path), finding);
       if (lineResult.status !== 'resolved') {
-        unresolved.push({ finding, status: lineResult.status });
+        unresolved.push({ finding, status: lineResult.status, finding_number });
         continue;
       }
       if (!isLineInDiff(rightLinesByPath, finding.path, lineResult.line)) {
-        unresolved.push({ finding, status: 'diff_outside_anchor', resolved_line: lineResult.line });
+        unresolved.push({ finding, status: 'diff_outside_anchor', resolved_line: lineResult.line, finding_number });
         continue;
       }
-      resolved.push({ ...finding, resolved_line: lineResult.line });
+      resolved.push({ ...finding, resolved_line: lineResult.line, finding_number });
     } catch (e) {
-      unresolved.push({ finding, status: 'file_unavailable', error: e.message });
+      unresolved.push({ finding, status: 'file_unavailable', error: e.message, finding_number });
     }
   }
 
@@ -291,7 +297,7 @@ function processFindings(payload, options = {}) {
   };
 }
 
-// 最終レビュー本文は、インライン指摘をすべて投稿した後にだけ投稿される。
+// 最終レビュー本文は、行／ファイル単位の finding スレッドをすべて投稿した後にだけ投稿される。
 // resultMarker を渡したときは末尾に掲載の印を付ける（finalize-issue.js が掲載を照合する）。
 function buildFinalReviewBody(result, resultMarker) {
   const body = formatFinalReviewBody(result);
@@ -302,8 +308,15 @@ function publish(payload, options = {}) {
   const result = processFindings(payload, options);
   if (!options.dryRun) {
     const postInline = options.postInlineReviewFn || postInlineComment;
+    const postFile = options.postFileReviewFn || postFileComment;
     const postFinal = options.postFinalReviewFn || postFinalReview;
-    for (const finding of result.posted) postInline(payload, finding);
+    const withMarker = (finding, findingNumber = finding.finding_number) => options.artifactBytes
+      ? { ...finding, review_finding_marker: reviewFindingMarker(payload.pr, options.artifactBytes, findingNumber) }
+      : finding;
+    for (const finding of result.posted) postInline(payload, withMarker(finding));
+    for (const item of result.unresolved) {
+      postFile(payload, { ...item, finding: withMarker(item.finding, item.finding_number) });
+    }
     postFinal(payload, buildFinalReviewBody(result, options.resultMarker));
   }
   return result;
@@ -316,8 +329,27 @@ function publishArtifactFile(artifactFile, options = {}) {
   const payload = parseJsonText(artifactBytes.toString('utf8'));
   return publish(payload, {
     ...options,
+    artifactBytes,
     resultMarker: reviewResultMarker(payload && payload.pr, artifactBytes),
   });
+}
+
+function parseArgs(argv) {
+  let parsed;
+  try {
+    parsed = parseFlags(argv, {
+      flags: {},
+      booleans: ['--dry-run', '--help', '-h'],
+      positionals: { min: 0, max: 1 },
+    });
+  } catch (error) {
+    if (error.name !== 'ArgsValidationError') throw error;
+    if (error.helpRequested) return { mode: 'help' };
+    throw new Error(error.errors.map((entry) => entry.message).join('; '));
+  }
+  if (parsed.values['--help'] || parsed.values['-h']) return { mode: 'help' };
+  if (parsed.rest.length !== 1) throw new Error('findings-json を1つ指定してください');
+  return { mode: 'run', file: parsed.rest[0], dryRun: Boolean(parsed.values['--dry-run']) };
 }
 
 module.exports = {
@@ -328,31 +360,31 @@ module.exports = {
   isLineInDiff,
   formatFindingHeading,
   formatFindingBody,
-  formatUnresolvedFinding,
+  formatFileFinding,
   formatFinalReviewBody,
   buildFinalReviewBody,
   processFindings,
   publish,
   publishArtifactFile,
+  postInlineComment,
+  postFileComment,
+  postFinalReview,
+  parseArgs,
+  USAGE,
 };
 
 if (require.main === module) {
-  const args = process.argv.slice(2);
-  if (args.includes('--help') || args.includes('-h')) {
-    console.log(USAGE);
-    process.exit(0);
-  }
-  const dryRun = args.includes('--dry-run');
-  const file = args.find(arg => arg !== '--dry-run');
-  if (!file) {
-    console.error(USAGE);
-    process.exit(1);
-  }
   try {
-    const result = publishArtifactFile(file, { dryRun });
-    if (dryRun) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    const args = parseArgs(process.argv.slice(2));
+    if (args.mode === 'help') {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    const result = publishArtifactFile(args.file, { dryRun: args.dryRun });
+    if (args.dryRun) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (e) {
     console.error(`review-publisher: ${e.message}`);
+    console.error(USAGE);
     process.exit(1);
   }
 }
