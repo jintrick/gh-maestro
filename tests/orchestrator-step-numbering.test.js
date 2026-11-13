@@ -239,7 +239,7 @@ test('15スキル断片の合図宣言が存在し、通知・script合図が実
   assert.equal(
     parseFrontmatter(stage1Premise).signals,
     null,
-    'premise-check-stage-1.mdは合図を持たないこと',
+    'premise-check-stage-1.mdは合図を持たずスキル断片ではないこと',
   );
   const eventTableStart = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## イベントの受け口');
   const eventTableEnd = fs.readFileSync(SKILL_PATH, 'utf8').indexOf('## 横断的な手続き', eventTableStart);
@@ -270,14 +270,14 @@ test('15スキル断片の合図宣言が存在し、通知・script合図が実
           assert.match(output, /以下は stage-5-plan-review\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで工程5のスキル断片本文が届くこと');
           assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで前提確認の共通定義スキル断片本文も届くこと');
           assert.match(output, /以下は premise-check-stage-5\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで前提確認の工程5スキル断片本文も届くこと');
-          assert.doesNotMatch(output, /以下は premise-check-stage-1\.md の現在の内容です。/, 'PLAN_REPORTEDで工程1スキル断片は届かないこと');
+          assert.doesNotMatch(output, /以下は premise-check-stage-1\.md の現在の内容です。/, 'PLAN_REPORTEDで工程1の参照ファイルは届かないこと');
           assert.doesNotMatch(output, /以下は premise-check-stage-7\.md の現在の内容です。/, 'PLAN_REPORTEDで工程7スキル断片は届かないこと');
         }
         if (name === 'PR_REVIEW' || name === 'REVIEW_COMMENT') {
           assert.match(output, /以下は triage\.md の現在の内容です。事実として参照してください。/, `${name}でトリアージのスキル断片本文が届くこと`);
           assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, `${name}で前提確認の共通定義スキル断片本文も届くこと`);
           assert.match(output, /以下は premise-check-stage-7\.md の現在の内容です。事実として参照してください。/, `${name}で前提確認の工程7スキル断片本文も届くこと`);
-          assert.doesNotMatch(output, /以下は premise-check-stage-1\.md の現在の内容です。/, `${name}で工程1スキル断片は届かないこと`);
+          assert.doesNotMatch(output, /以下は premise-check-stage-1\.md の現在の内容です。/, `${name}で工程1の参照ファイルは届かないこと`);
           assert.doesNotMatch(output, /以下は premise-check-stage-5\.md の現在の内容です。/, `${name}で工程5スキル断片は届かないこと`);
         }
         assert.ok(output.length <= 9000, `${name}で届くスキル断片が9000文字以下であること`);
@@ -340,4 +340,32 @@ test('工程7に修正push後のexplorer事実確認が番号付き中項目と�
   assert.match(stage7, /7-\[4\/6\].*修正push後の事実確認/);
   const handbook = fs.readFileSync(path.join(SKILL_DIR, 'stage-7-review-merge.md'), 'utf8');
   assert.match(handbook, /PR_PUSH/);
+});
+
+test('stage-1-requirements.mdは共通の定義と工程1のファイルを参照し、共通の定義は工程別ファイルに複製されていない', () => {
+  const stage1 = fs.readFileSync(path.join(SKILL_DIR, 'stage-1-requirements.md'), 'utf8');
+  assert.match(stage1, /premise-check\.md/, 'stage-1-requirements.mdが共通の定義(premise-check.md)を参照すること');
+  assert.match(stage1, /premise-check-stage-1\.md/, 'stage-1-requirements.mdが工程1のファイル(premise-check-stage-1.md)を参照すること');
+
+  const common = fs.readFileSync(path.join(SKILL_DIR, 'premise-check.md'), 'utf8');
+  const commonIdentifiers = [
+    '## 共通の定義',
+    '### 疑う対象の仕組み',
+    '### explorer への依頼の共通原則',
+    '### Issueコメントとチャットの書式',
+    '自前で作る、維持する、または変更する仕組みのうち、状態の同期、再試行、待ち行列、キャッシュなど汎用的なものと、汎用性を問わずセキュリティに関わるものを対象にする。',
+    '依頼には達成したいことと、確認してほしい事実を書く。候補の設計や選んだライブラリ、「Xで足りるか」という問いを調査の枠にしない。',
+    'Issueコメントは冒頭に結論を置き、問いごとに見出しを分け、標準の形など外部の事実には出典リンクを付ける。',
+  ];
+
+  for (const marker of commonIdentifiers) {
+    assert.ok(common.includes(marker), `premise-check.mdに共通の定義「${marker}」があること`);
+  }
+
+  for (const stageFile of ['premise-check-stage-1.md', 'premise-check-stage-5.md', 'premise-check-stage-7.md']) {
+    const content = fs.readFileSync(path.join(SKILL_DIR, stageFile), 'utf8');
+    for (const marker of commonIdentifiers) {
+      assert.equal(content.includes(marker), false, `${stageFile}に共通の定義「${marker}」が複製されていないこと`);
+    }
+  }
 });
