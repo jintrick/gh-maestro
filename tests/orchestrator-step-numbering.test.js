@@ -263,6 +263,10 @@ test('13手順書の合図宣言が存在し、通知・script合図が実際の
           assert.match(output, /以下は stage-5-plan-review\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで工程5の手順書本文が届くこと');
           assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, 'PLAN_REPORTEDで前提確認の問い本文も届くこと');
         }
+        if (name === 'PR_REVIEW' || name === 'REVIEW_COMMENT') {
+          assert.match(output, /以下は triage\.md の現在の内容です。事実として参照してください。/, `${name}でトリアージ手順書本文が届くこと`);
+          assert.match(output, /以下は premise-check\.md の現在の内容です。事実として参照してください。/, `${name}で前提確認の問い本文も届くこと`);
+        }
         assert.ok(output.length <= 9000, `${name}の追加文脈が9000文字以下であること`);
       } else if (signal.startsWith('script:')) {
         const [, scriptName] = /^script:([^:]+):(.+)$/.exec(signal) || [];
@@ -279,7 +283,11 @@ test('13手順書の合図宣言が存在し、通知・script合図が実際の
   }
 
   assert.deepEqual([...signalsByFile.keys()].sort(), [...expectedFiles].sort());
-  assert.ok(signalsByFile.get('premise-check.md').includes('notify:PLAN_REPORTED'), 'premise-check.mdがPLAN_REPORTEDを宣言すること');
+  assert.deepEqual(
+    [...signalsByFile.get('premise-check.md')].sort(),
+    ['notify:PLAN_REPORTED', 'notify:PR_REVIEW', 'notify:REVIEW_COMMENT'],
+    'premise-check.mdがPLAN_REPORTED・PR_REVIEW・REVIEW_COMMENTを宣言すること',
+  );
   const merged = renderNotificationGuidance({
     workspace: path.dirname(SKILL_DIR), skillDirectory: SKILL_DIR,
     prompt: '<task-notification><event>PR_MERGED:42</event></task-notification>',
