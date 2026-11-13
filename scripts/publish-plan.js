@@ -21,7 +21,7 @@ const { spawnSync } = require('./shared/child-process');
 const { resolveWorkspace, parseFlags } = require('./shared/workspace');
 const { toWinPath } = require('./shared/win-path');
 const { resolveTextInput, StdinTTYError } = require('./shared/text-input');
-const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { listComments, createComment, updateComment, parseCommentsResponse } = require('./shared/gh-comments');
 const { PLAN_MARKER, isPlanComment } = require('./shared/plan-comment');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 
@@ -61,13 +61,11 @@ let _ghListComments = (issue, repo, opts = {}) => {
 };
 
 let _ghCreateComment = (issue, repo, body, opts = {}) => {
-  return spawnSync('gh', ['api', `repos/${repo}/issues/${issue}/comments`,
-    '-f', `body=${body}`], { encoding: 'utf8', ...opts });
+  return createComment(repo, issue, body, opts);
 };
 
 let _ghUpdateComment = (commentId, repo, body, opts = {}) => {
-  return spawnSync('gh', ['api', '-X', 'PATCH', `repos/${repo}/issues/comments/${commentId}`,
-    '-f', `body=${body}`], { encoding: 'utf8', ...opts });
+  return updateComment(repo, commentId, body, opts);
 };
 
 let _ghPinComment = (commentId, repo, opts = {}) => {

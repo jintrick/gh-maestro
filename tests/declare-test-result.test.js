@@ -755,3 +755,110 @@ test('buildCommentBody: worktree の外の場所はファイル名だけにす�
   assert.ok(body.includes('場所: `x.test.js:9:1`'), body);
   assert.doesNotMatch(body, /D:[\\/]+other/);
 });
+
+function loadDeclareTestResultWithSpawn(fakeSpawnSync) {
+  const cpPath = require.resolve('../scripts/shared/child-process');
+  const gcPath = require.resolve('../scripts/shared/gh-comments');
+  const dtrPath = require.resolve('../scripts/declare-test-result');
+  const savedCp = require.cache[cpPath];
+  const savedGc = require.cache[gcPath];
+  const savedDtr = require.cache[dtrPath];
+  require.cache[cpPath] = { id: cpPath, filename: cpPath, loaded: true, exports: { spawnSync: fakeSpawnSync } };
+  delete require.cache[gcPath];
+  delete require.cache[dtrPath];
+  try {
+    return require(dtrPath);
+  } finally {
+    if (savedCp) require.cache[cpPath] = savedCp; else delete require.cache[cpPath];
+    if (savedGc) require.cache[gcPath] = savedGc; else delete require.cache[gcPath];
+    if (savedDtr) require.cache[dtrPath] = savedDtr; else delete require.cache[dtrPath];
+  }
+}
+
+test('declareTestResult: 既定実装は 32KB超の日本語を含む本文でも新規投稿・更新ともに -F body=@- と stdin で渡し argv へ本文を載せない', () => {
+  const layers = {};
+  for (let i = 0; i < 320; i++) {
+    layers[`layer-${i}-日本語テスト層`] = {
+      status: 'complete', outcome: 'pass', tests: 10, pass: 10, fail: 0,
+      executor: 'test-runner', scope: 'full', testedContentHash: CONTENT_HASH,
+      executionLogPath: `log-日本語-${i}.json`,
+    };
+  }
+  const largeArtifact = { provenance: 'test-runner', scope: 'aggregate', layers };
+  const expectedBody = buildCommentBody({ commit: SHA, testResult: largeArtifact });
+  assert.ok(Buffer.byteLength(expectedBody, 'utf8') > 32768, `テスト前提: 32KB超 (${Buffer.byteLength(expectedBody, 'utf8')} bytes)`);
+
+  for (const mode of ['create', 'update']) {
+    const calls = [];
+    const existingComments = mode === 'update'
+      ? [{ id: 777, body: expectedBody, html_url: 'https://github.com/owner/repo/pull/42#issuecomment-777' }]
+      : [];
+    const fresh = loadDeclareTestResultWithSpawn((cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      if (args[1] === '--method' && args[2] === 'GET') {
+        return { status: 0, stdout: JSON.stringify(existingComments), stderr: '' };
+      }
+      return { status: 0, stdout: JSON.stringify({ html_url: 'https://github.com/owner/repo/pull/42#issuecomment-777' }), stderr: '' };
+    });
+
+    const res = fresh.declareTestResult(
+      { pr: '42', repo: 'owner/repo', headSha: SHA },
+      {
+        gitHeadFn: () => SHA,
+        readTestResultFn: () => ({ ok: true, result: largeArtifact }),
+        commitContentHashFn: () => CONTENT_HASH,
+      },
+    );
+    assert.equal(res.ok, true, `${mode}: ${res.error}`);
+    assert.equal(res.action, mode === 'create' ? 'created' : 'updated');
+
+    const writeCall = calls.find(c => c.cmd === 'gh' && c.args.includes('-F') && c.args.includes('body=@-'));
+    assert.ok(writeCall, `${mode}: -F body=@- で gh api を呼ぶ`);
+    const expectedArgs = mode === 'create'
+      ? ['api', 'repos/owner/repo/issues/42/comments', '-X', 'POST', '-F', 'body=@-']
+      : ['api', 'repos/owner/repo/issues/comments/777', '-X', 'PATCH', '-F', 'body=@-'];
+    assert.deepEqual(writeCall.args, expectedArgs);
+    assert.ok(writeCall.args.join(' ').length < 256, 'argv に長文本文を含めない');
+    assert.equal(writeCall.opts.encoding, 'utf8');
+    assert.equal(writeCall.opts.input, expectedBody);
+  }
+});
+
+test('declareTestResult: stderr が空で spawn error だけがある場合も error.message を失敗理由へ残す', () => {
+  const { declareTestResult: dtr } = loadDeclareTestResultWithSpawn(() => ({
+    status: null,
+    stdout: '',
+    stderr: '',
+    error: new Error('spawnSync gh EPIPE'),
+  }));
+
+  const artifact = {
+    provenance: 'test-runner',
+    scope: 'full',
+    outcome: 'pass',
+    tests: 1,
+    pass: 1,
+    fail: 0,
+    testedContentHash: CONTENT_HASH,
+  };
+  for (const mode of ['create', 'update']) {
+    const res = dtr(
+      { pr: '42', repo: 'owner/repo', headSha: SHA },
+      {
+        gitHeadFn: () => SHA,
+        readTestResultFn: () => ({ ok: true, result: artifact }),
+        commitContentHashFn: () => CONTENT_HASH,
+        ghListCommentsFn: () => ({
+          status: 0,
+          stdout: mode === 'create'
+            ? '[]'
+            : JSON.stringify([{ id: 777, body: `${TEST_RESULT_MARKER}\nold` }]),
+          stderr: '',
+        }),
+      },
+    );
+    assert.equal(res.ok, false);
+    assert.match(res.error, /spawnSync gh EPIPE/, `${mode}: error.message が含まれる`);
+    assert.doesNotMatch(res.error, /\(no stderr\)/);
+  }
+});

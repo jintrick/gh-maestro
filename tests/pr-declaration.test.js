@@ -79,7 +79,7 @@ test('upsertDeclarationComment: 同じHEADの既存コメントが無ければ�
   calls.length = 0;
   const updated = upsertDeclarationComment({ pr: 5, repo: 'o/r', headSha: HEAD, table: TABLE, listCommentsFn: existing, spawnSyncFn });
   assert.equal(updated.action, 'updated');
-  assert.deepEqual(calls[0].args.slice(0, 4), ['api', '-X', 'PATCH', 'repos/o/r/issues/comments/77']);
+  assert.deepEqual(calls[0].args.slice(0, 6), ['api', 'repos/o/r/issues/comments/77', '-X', 'PATCH', '-F', 'body=@-']);
 });
 
 test('upsertDeclarationComment: 投稿に失敗したら ok:false を返す（例外にしない）', () => {
@@ -105,4 +105,67 @@ test('upsertDeclarationComment: gh 呼び出しに有限の timeout を付け、
   assert.equal(timedOut.ok, false);
   assert.match(timedOut.error, /投稿に失敗/);
   assert.equal(seenOptions[0].timeout, 30000, 'gh-comments.js の GH_TIMEOUT_MS と同じ有限値');
+});
+
+test('upsertDeclarationComment: 32KB超（約98KB）の日本語申告表を新規投稿・更新ともに -F body=@- と stdin で渡し argv に載せない', () => {
+  const rows = Array.from({ length: 220 }, (_, i) =>
+    `| tests/sample-${i}.test.js:10 テスト${i} | ロジック${i}の欠陥で日本語アサーションが失敗する | 要件定義#${i} | 未実施（範囲外）: 欠陥${i}を直接比較で検出 |`
+  );
+  const largeTable = ['| テスト | 何が壊れたら失敗するか | 期待値の出所 | 変異確認 |', '|---|---|---|---|', ...rows].join('\n');
+  const expectedBody = `${MARKER}\n${largeTable}\n`;
+  assert.ok(Buffer.byteLength(expectedBody, 'utf8') > 32768, 'テスト前提: 32KB超の日本語申告表');
+
+  for (const mode of ['create', 'update']) {
+    const calls = [];
+    const existingList = mode === 'update'
+      ? [trusted({ id: 77, body: `${MARKER}\n旧表` })]
+      : [];
+    const res = upsertDeclarationComment({
+      pr: 5,
+      repo: 'o/r',
+      headSha: HEAD,
+      table: largeTable,
+      listCommentsFn: () => ({ status: 0, stdout: JSON.stringify(existingList) }),
+      spawnSyncFn: (cmd, args, opts) => {
+        calls.push({ cmd, args, opts });
+        return { status: 0, stdout: '{"html_url":"https://example/ok"}' };
+      },
+    });
+    assert.equal(res.ok, true);
+    assert.equal(res.action, mode === 'create' ? 'created' : 'updated');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].cmd, 'gh');
+    const expectedArgs = mode === 'create'
+      ? ['api', 'repos/o/r/issues/5/comments', '-X', 'POST', '-F', 'body=@-']
+      : ['api', 'repos/o/r/issues/comments/77', '-X', 'PATCH', '-F', 'body=@-'];
+    assert.deepEqual(calls[0].args, expectedArgs);
+    assert.ok(calls[0].args.join(' ').length < 256, 'argv に長文申告表を含めない');
+    assert.equal(calls[0].opts.encoding, 'utf8');
+    assert.equal(calls[0].opts.timeout, 30000);
+    assert.equal(calls[0].opts.input, expectedBody);
+  }
+});
+
+test('upsertDeclarationComment / readPrDeclarationEvidence: 空白のみ stderr 時に ghErrorDetail で error.message へフォールバックする', () => {
+  const postRes = upsertDeclarationComment({
+    pr: 5,
+    repo: 'o/r',
+    headSha: HEAD,
+    table: '| テスト | 欠陥 | 出所 | 変異 |\n|---|---|---|---|\n| t | d | s | m |',
+    listCommentsFn: () => ({ status: 0, stdout: '[]' }),
+    spawnSyncFn: () => ({ status: null, stdout: '', stderr: '   \n', error: new Error('write EPIPE') }),
+  });
+  assert.equal(postRes.ok, false);
+  assert.match(postRes.error, /write EPIPE/);
+  assert.doesNotMatch(postRes.error, /unknown error/);
+
+  const readRes = readPrDeclarationEvidence({
+    pr: 5,
+    repo: 'o/r',
+    headSha: HEAD,
+    listCommentsFn: () => ({ status: null, stdout: '', stderr: '\t ', error: new Error('list timed out') }),
+  });
+  assert.equal(readRes.status, 'unavailable');
+  assert.match(readRes.reason, /list timed out/);
+  assert.doesNotMatch(readRes.reason, /unknown error/);
 });

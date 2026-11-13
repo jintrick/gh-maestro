@@ -180,7 +180,7 @@ function incompleteResults(dir, findings) {
 
 async function postedIncompleteComment(resultsPath, workspace, options) {
   let body = null;
-  _setGhForTest((args) => { body = args[args.indexOf('--body') + 1]; return { status: 0, stdout: 'https://x/c\n', stderr: '' }; });
+  _setGhForTest((_args, opts) => { body = opts.input; return { status: 0, stdout: 'https://x/c\n', stderr: '' }; });
   try {
     const res = await finalizeReview(resultsPath, 'incomplete', null, workspace, null, options);
     assert.equal(res.ok, true);

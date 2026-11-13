@@ -7,10 +7,9 @@
 // 申告表の投稿者は信頼される association（OWNER / MEMBER / COLLABORATOR）に限る。
 
 const { spawnSync } = require('./child-process');
-const { listComments, parseCommentsResponse } = require('./gh-comments');
+const { listComments, createComment, updateComment, ghErrorDetail, parseCommentsResponse } = require('./gh-comments');
 const { isTrustedCommentAuthor } = require('./comment-author-trust');
 
-const GH_TIMEOUT_MS = 30000;
 const DECLARATION_MARKER_PREFIX = 'gh-maestro:pr-declaration';
 // 申告表のために push-and-declare.js が作った下書きPRの所有マーカー（PR本文の末尾に置く）。
 // 人間が作った下書きには付かないため、公開の対象を区別できる。
@@ -74,8 +73,8 @@ function readPrDeclarationEvidence({ pr, repo, headSha, listCommentsFn = listCom
     return unavailable(`PRコメントの取得に失敗しました: ${error.message}`);
   }
   if (!listed || listed.error || listed.status !== 0) {
-    const detail = (listed && (listed.stderr || (listed.error && listed.error.message))) || 'unknown error';
-    return unavailable(`PRコメントの取得に失敗しました: ${String(detail).trim()}`);
+    const detail = ghErrorDetail(listed, { fallback: 'unknown error' });
+    return unavailable(`PRコメントの取得に失敗しました: ${detail}`);
   }
   let comments;
   try {
@@ -105,8 +104,8 @@ function upsertDeclarationComment({ pr, repo, headSha, table, cwd, listCommentsF
   }
   const listed = listCommentsFn(repo, pr, { cwd });
   if (!listed || listed.error || listed.status !== 0) {
-    const detail = (listed && listed.stderr) || 'unknown error';
-    return { ok: false, error: `申告表コメントの一覧取得に失敗しました: ${String(detail).trim()}` };
+    const detail = ghErrorDetail(listed, { fallback: 'unknown error' });
+    return { ok: false, error: `申告表コメントの一覧取得に失敗しました: ${detail}` };
   }
   let comments;
   try {
@@ -118,16 +117,13 @@ function upsertDeclarationComment({ pr, repo, headSha, table, cwd, listCommentsF
 
   const existing = findDeclarationForHead(comments, headSha);
   const updating = Boolean(existing && existing.commentId !== null);
-  const args = updating
-    ? ['api', '-X', 'PATCH', `repos/${repo}/issues/comments/${existing.commentId}`, '-f', `body=${body}`]
-    : ['api', `repos/${repo}/issues/${pr}/comments`, '-f', `body=${body}`];
-  // 有限の timeout（応答しない GitHub で push 前・申告段が無期限に止まらないように）。
-  // 値は gh-comments.js の GH_TIMEOUT_MS と同じ。超過は spawnSync の error（ETIMEDOUT）になり、
-  // 下の判定で失敗として呼び出し元へ返る。
-  const posted = spawnSyncFn('gh', args, { encoding: 'utf8', cwd, timeout: GH_TIMEOUT_MS });
+  // 長文の申告表（98KB 超等）で Windows の argv 上限に当たらないよう、gh-comments.js 経由で stdin 渡しにする。
+  const posted = updating
+    ? updateComment(repo, existing.commentId, body, { cwd, spawnSyncFn })
+    : createComment(repo, pr, body, { cwd, spawnSyncFn });
   if (posted.error || posted.status !== 0) {
-    const detail = posted.stderr || (posted.error && posted.error.message) || 'unknown error';
-    return { ok: false, error: `申告表コメントの投稿に失敗しました: ${String(detail).trim()}` };
+    const detail = ghErrorDetail(posted, { fallback: 'unknown error' });
+    return { ok: false, error: `申告表コメントの投稿に失敗しました: ${detail}` };
   }
   let url = '';
   try {

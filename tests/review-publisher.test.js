@@ -10,11 +10,13 @@ const {
   parseRightLinesByPath,
   isLineInDiff,
   formatFinalReviewBody,
+  formatFindingBody,
   formatFileFinding,
   processFindings,
   publish,
   postInlineComment,
   postFileComment,
+  postFinalReview,
 } = require('../scripts/review-publisher');
 
 function finding(overrides = {}) {
@@ -184,26 +186,30 @@ test('review comment API arguments use line anchors for inline comments and subj
 
   assert.equal(calls.length, 2);
   assert.equal(calls[0].command, 'gh');
-  assert.deepEqual(calls[0].args.slice(0, 5), ['api', 'repos/acme/repo/pulls/12/comments', '-X', 'POST', '-f']);
+  assert.deepEqual(calls[0].args.slice(0, 6), ['api', 'repos/acme/repo/pulls/12/comments', '-X', 'POST', '-F', 'body=@-']);
   assert.ok(calls[0].args.includes('commit_id=deadbeef'));
   assert.ok(calls[0].args.includes('path=src/foo.ts'));
   assert.ok(calls[0].args.includes('line=8'));
   assert.ok(calls[0].args.includes('side=RIGHT'));
-  assert.ok(calls[0].args.some((arg) => arg.includes(marker)));
+  assert.ok(calls[0].options.input.includes(marker));
 
   assert.deepEqual(calls[1].args, [
     'api',
     'repos/acme/repo/pulls/12/comments',
     '-X', 'POST',
-    '-f', 'body=[Correctness] 🔴 **BLOCKER**: Save is not awaited\n判定根拠: APIが成功を返した後に永続化が失敗するとデータ損失が発生する\n\n変更後のコードは saveUser(user) を await せずに呼び出している。saveUser が reject されると API は成功を返しているにもかかわらずデータが永続化されない。await を追加して修正する。\n\n位置に結び付けられなかったため、ファイル単位で投稿しました（ambiguous_anchor）。\n\n' + marker,
+    '-F', 'body=@-',
     '-f', 'commit_id=deadbeef',
     '-f', 'path=src/foo.ts',
     '-f', 'subject_type=file',
   ]);
+  assert.equal(
+    calls[1].options.input,
+    '[Correctness] 🔴 **BLOCKER**: Save is not awaited\n判定根拠: APIが成功を返した後に永続化が失敗するとデータ損失が発生する\n\n変更後のコードは saveUser(user) を await せずに呼び出している。saveUser が reject されると API は成功を返しているにもかかわらずデータが永続化されない。await を追加して修正する。\n\n位置に結び付けられなかったため、ファイル単位で投稿しました（ambiguous_anchor）。\n\n' + marker
+  );
   assert.ok(calls[1].args.includes('subject_type=file'));
   assert.ok(!calls[1].args.some((arg) => arg === 'line=8' || arg.startsWith('line=')));
   assert.ok(!calls[1].args.includes('side=RIGHT'));
-  assert.ok(calls[1].args.some((arg) => arg.includes('ambiguous_anchor')));
+  assert.ok(calls[1].options.input.includes('ambiguous_anchor'));
 });
 
 test('publish identifies every finding by raw artifact bytes and posts all threads before the final review', () => {
@@ -314,4 +320,55 @@ test('publishArtifactFile puts the exact marker of the artifact bytes on the fin
         + `<!-- gh-maestro:review-manager-result:v1:pr=7:sha256=${expectedSha} -->`,
     );
   });
+});
+
+test('postInlineComment / postFileComment / postFinalReview: 32KB超の日本語本文を argv に載せず -F body=@- と opts.input (UTF-8) で渡す', () => {
+  const largeJapaneseText = '日本語のレビュー指摘詳細・根拠説明。\n'.repeat(1800);
+  assert.ok(Buffer.byteLength(largeJapaneseText, 'utf8') > 32768, 'テスト前提: 32KB超の日本語本文');
+
+  const payload = { repo: 'acme/repo', pr: 12, headRefOid: 'deadbeef' };
+  const marker = '<!-- gh-maestro:review-manager-finding:v1:pr=12:sha256=abc:finding=1 -->';
+  const inlineFinding = { ...finding({ body: largeJapaneseText }), resolved_line: 8, review_finding_marker: marker };
+  const fileItem = { finding: finding({ body: largeJapaneseText, review_finding_marker: marker }), status: 'unresolved_anchor' };
+
+  const calls = [];
+  const spawn = (command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0, stdout: '{}', stderr: '' };
+  };
+
+  postInlineComment(payload, inlineFinding, spawn);
+  postFileComment(payload, fileItem, spawn);
+  postFinalReview(payload, largeJapaneseText, spawn);
+
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0].args, [
+    'api', 'repos/acme/repo/pulls/12/comments', '-X', 'POST', '-F', 'body=@-',
+    '-f', 'commit_id=deadbeef', '-f', 'path=src/foo.ts', '-F', 'line=8', '-f', 'side=RIGHT',
+  ]);
+  assert.equal(calls[0].options.input, formatFindingBody(inlineFinding, marker));
+
+  assert.deepEqual(calls[1].args, [
+    'api', 'repos/acme/repo/pulls/12/comments', '-X', 'POST', '-F', 'body=@-',
+    '-f', 'commit_id=deadbeef', '-f', 'path=src/foo.ts', '-f', 'subject_type=file',
+  ]);
+  assert.equal(calls[1].options.input, formatFileFinding(fileItem, marker));
+
+  assert.deepEqual(calls[2].args, [
+    'api', 'repos/acme/repo/pulls/12/reviews', '-X', 'POST', '-F', 'body=@-', '-f', 'event=COMMENT',
+  ]);
+  assert.equal(calls[2].options.input, largeJapaneseText);
+
+  for (const call of calls) {
+    assert.equal(call.command, 'gh');
+    assert.ok(call.args.join(' ').length < 512, 'argv に長文本文を含めない');
+    assert.equal(call.options.encoding, 'utf8');
+    assert.equal(call.options.timeout, 30000);
+    assert.ok(Buffer.byteLength(call.options.input, 'utf8') > 32768);
+  }
+
+  assert.throws(
+    () => postFinalReview(payload, 'x', () => ({ status: null, stdout: '', stderr: '', error: new Error('spawnSync gh EPIPE') })),
+    /spawnSync gh EPIPE/
+  );
 });

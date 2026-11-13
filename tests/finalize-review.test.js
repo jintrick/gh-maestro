@@ -20,7 +20,7 @@ const {
 
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES } = require('../scripts/shared/review-aspects');
 const { _validateAgainstSchema } = require('../scripts/shared/json-schema');
-const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const { createTempDirScope, withTempDir } = require('../scripts/shared/temp-directory');
 
 const tempDirScope = createTempDirScope();
 test.after(() => tempDirScope.cleanup());
@@ -489,4 +489,99 @@ test('aggregateFindings accepts Test Quality aspect findings and validates schem
 
   const schemaErrors = _validateAgainstSchema(payload, schema);
   assert.deepEqual(schemaErrors, [], 'payload should pass schema validation');
+});
+
+function loadFinalizeReviewWithSpawn(fakeSpawnSync) {
+  const cpPath = require.resolve('../scripts/shared/child-process');
+  const gcPath = require.resolve('../scripts/shared/gh-comments');
+  const frPath = require.resolve('../scripts/finalize-review');
+  const savedCp = require.cache[cpPath];
+  const savedGc = require.cache[gcPath];
+  const savedFr = require.cache[frPath];
+  require.cache[cpPath] = { id: cpPath, filename: cpPath, loaded: true, exports: { spawnSync: fakeSpawnSync } };
+  delete require.cache[gcPath];
+  delete require.cache[frPath];
+  try {
+    return require(frPath);
+  } finally {
+    if (savedCp) require.cache[cpPath] = savedCp; else delete require.cache[cpPath];
+    if (savedGc) require.cache[gcPath] = savedGc; else delete require.cache[gcPath];
+    if (savedFr) require.cache[frPath] = savedFr; else delete require.cache[frPath];
+  }
+}
+
+test('finalizeReview(incomplete): 注入した child-process モック境界で 32KB超の日本語コメントの argv/stdin 組み立てを検証する', async () => {
+  await withTempDir('fr-large-', async (tmpDir) => {
+    const savedTestCtx = process.env.NODE_TEST_CONTEXT;
+    try {
+      const findings = Array.from({ length: 120 }, (_, i) => ({
+        aspect: 'Correctness',
+        path: `src/file-${i}.js`,
+        line_anchor: `anchor_${i}()`,
+        summary: `日本語の指摘要約-${i}: 境界条件の検証が不足している`,
+        severity: 'MAJOR',
+        severity_rationale: `理由-${i}: 異常系でフォールバックせずクラッシュするため`,
+        body: `詳細説明-${i}: `.repeat(8) + '日本語テキスト',
+        verified_references: [`src/file-${i}.js`],
+      }));
+      const results = {
+        manifest_ref: { pr: 5, repo: 'o/r', headRefOid: 'abc' },
+        coverage_ledger: {
+          leaves: [
+            { id: 'correctness/logic-invariants', trunk: 'Correctness', decision: 'adopted', rationale: null },
+            { id: 'correctness/api-contract', trunk: 'Correctness', decision: 'adopted', rationale: null },
+          ],
+        },
+        jobs: [
+          { id: 'job-1', status: 'success', leaf_ids: ['correctness/logic-invariants'], findings },
+          { id: 'job-2', status: 'failed', leaf_ids: ['correctness/api-contract'], error: 'timeout', findings: [] },
+        ],
+      };
+      const resultsPath = path.join(tmpDir, 'results.json');
+      fs.writeFileSync(resultsPath, JSON.stringify(results), 'utf8');
+
+      const calls = [];
+      const fresh = loadFinalizeReviewWithSpawn((cmd, args, opts) => {
+        calls.push({ cmd, args, opts });
+        return { status: 0, stdout: 'https://github.com/o/r/pull/5#issuecomment-774\n', stderr: '' };
+      });
+
+      delete process.env.NODE_TEST_CONTEXT;
+      const res = await fresh.finalizeReview(resultsPath, 'incomplete', null, tmpDir);
+      assert.equal(res.ok, true);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cmd, 'gh');
+      assert.deepEqual(calls[0].args, ['pr', 'comment', '5', '--repo', 'o/r', '--body-file', '-']);
+      assert.ok(calls[0].args.join(' ').length < 256, 'argv に長文コメントを含めない');
+      assert.equal(calls[0].opts.encoding, 'utf8');
+      assert.ok(Buffer.byteLength(calls[0].opts.input, 'utf8') > 32768, '32KB超の日本語コメントが stdin に渡る');
+      assert.ok(calls[0].opts.input.includes('日本語の指摘要約-119'));
+    } finally {
+      if (savedTestCtx !== undefined) process.env.NODE_TEST_CONTEXT = savedTestCtx;
+    }
+  });
+});
+
+test('finalizeReview(incomplete): stderr が空で spawn error だけがある場合も error.message を commentError とセンチネルへ残す', async () => {
+  await withTempDir('fr-err-', async (tmpDir) => {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    fs.writeFileSync(resultsPath, JSON.stringify({
+      manifest_ref: { pr: 6, repo: 'o/r', headRefOid: 'abc' },
+      coverage_ledger: {
+        leaves: [{ id: 'correctness/api-contract', trunk: 'Correctness', decision: 'adopted', rationale: null }],
+      },
+      jobs: [{ id: 'job-1', status: 'failed', leaf_ids: ['correctness/api-contract'], error: 'timeout', findings: [] }],
+    }), 'utf8');
+
+    _setGhForTest(() => ({ status: null, stdout: '', stderr: '', error: new Error('spawnSync gh EPIPE') }));
+    try {
+      const res = await finalizeReview(resultsPath, 'incomplete', null, tmpDir);
+      assert.equal(res.ok, false);
+      assert.match(res.summary.error, /spawnSync gh EPIPE/);
+      const sentinel = JSON.parse(fs.readFileSync(res.summary.sentinelPath, 'utf8'));
+      assert.equal(sentinel.postError, 'spawnSync gh EPIPE');
+    } finally {
+      _setGhForTest(null);
+    }
+  });
 });

@@ -12,11 +12,10 @@
 
 'use strict';
 
-const { spawnSync } = require('./shared/child-process');
 const { parseFlags } = require('./shared/workspace');
 const { resolveRepo } = require('./shared/repo');
 const { resolveGitHead } = require('./shared/git-head');
-const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
+const { listComments, createComment, updateComment, ghErrorDetail, parseCommentsResponse } = require('./shared/gh-comments');
 const {
   TEST_CONTENT_HASH_RE,
   calculateCommitContentHash,
@@ -71,13 +70,11 @@ let _ghListComments = (pr, repo, opts = {}) => {
 };
 
 let _ghCreateComment = (pr, repo, body, opts = {}) => {
-  return spawnSync('gh', ['api', `repos/${repo}/issues/${pr}/comments`,
-    '-f', `body=${body}`], { encoding: 'utf8', ...opts });
+  return createComment(repo, pr, body, opts);
 };
 
 let _ghUpdateComment = (commentId, repo, body, opts = {}) => {
-  return spawnSync('gh', ['api', '-X', 'PATCH', `repos/${repo}/issues/comments/${commentId}`,
-    '-f', `body=${body}`], { encoding: 'utf8', ...opts });
+  return updateComment(repo, commentId, body, opts);
 };
 
 function isKnownTestResult(testResult) {
@@ -565,7 +562,7 @@ function declareTestResult(params = {}, deps = {}) {
   // 3. コメント一覧取得
   const listRes = ghListCommentsFn(String(prNum), targetRepo);
   if (!listRes || listRes.status !== 0) {
-    return { ok: false, error: `PR コメント一覧の取得に失敗しました: ${(listRes && listRes.stderr) || '(no stderr)'}` };
+    return { ok: false, error: `PR コメント一覧の取得に失敗しました: ${ghErrorDetail(listRes)}` };
   }
 
   let comments;
@@ -589,7 +586,7 @@ function declareTestResult(params = {}, deps = {}) {
     const fullBody = mergeAggregateDeclarationBodies(String(existingComment.body || ''), ownBody);
     const updateRes = ghUpdateCommentFn(existingComment.id, targetRepo, fullBody);
     if (!updateRes || updateRes.status !== 0) {
-      return { ok: false, error: `申告コメントの更新に失敗しました: ${(updateRes && updateRes.stderr) || '(no stderr)'}` };
+      return { ok: false, error: `申告コメントの更新に失敗しました: ${ghErrorDetail(updateRes)}` };
     }
     // GET→PATCH の間に別の書き手が更新していた場合、その層を上書きして消している。
     // 再試行はせず（ADR 0006）、書き込み後に1回だけ読み直して欠落を失敗として報告する。
@@ -612,7 +609,7 @@ function declareTestResult(params = {}, deps = {}) {
 
   const createRes = ghCreateCommentFn(String(prNum), targetRepo, ownBody);
   if (!createRes || createRes.status !== 0) {
-    return { ok: false, error: `申告コメントの投稿に失敗しました: ${(createRes && createRes.stderr) || '(no stderr)'}` };
+    return { ok: false, error: `申告コメントの投稿に失敗しました: ${ghErrorDetail(createRes)}` };
   }
   let url;
   try {
