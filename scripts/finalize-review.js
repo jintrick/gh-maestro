@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('./shared/child-process');
+const { createPrComment, ghErrorDetail } = require('./shared/gh-comments');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { ALL_LEAF_IDS, TRUNK_TO_LEAVES, VALID_ASPECTS } = require('./shared/review-aspects');
 const { _validateAgainstSchema } = require('./shared/json-schema');
@@ -506,26 +506,16 @@ async function finalizeReview(resultsPath, mode, outputPath, workspace, integrat
     let commentUrl = null;
     let commentError = null;
 
-    // 長文の不完全レビューコメントで Windows の argv 上限に当たらないよう --body-file - と stdin で渡す。
-    const ghArgs = ['pr', 'comment', String(pr), '--repo', repo, '--body-file', '-'];
-    const ghOpts = { encoding: 'utf8', stdio: 'pipe', input: String(commentBody ?? '') };
-    let ghResult;
-    if (_ghForTest) {
-      ghResult = _ghForTest(ghArgs, ghOpts);
-    } else if (process.env.NODE_TEST_CONTEXT) {
-      ghResult = { status: 1, stdout: '', stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません' };
-    } else {
-      try {
-        ghResult = spawnSync('gh', ghArgs, ghOpts);
-      } catch (e) {
-        ghResult = { status: 1, stdout: '', stderr: e.message };
-      }
-    }
+    // 長文の不完全レビューコメントで Windows の argv 上限に当たらないよう、共有ヘルパー経由で --body-file - と stdin を使って投稿する。
+    const ghResult = createPrComment(repo, pr, commentBody, {
+      ghForTest: _ghForTest,
+      respectTestContextGuard: true,
+    });
 
     if (ghResult && ghResult.status === 0) {
       commentUrl = (ghResult.stdout || '').trim();
     } else {
-      commentError = (ghResult && (ghResult.stderr || '')) ? String(ghResult.stderr).trim() : '(gh 投稿失敗)';
+      commentError = ghErrorDetail(ghResult, { fallback: '(gh 投稿失敗)' });
     }
 
     // 4. センチネルファイル作成。

@@ -25,6 +25,7 @@ const { resolveAgentConfig, resolveSkillAgentMap, validateNonInteractiveTokens }
 const { workerLogPath } = require('./shared/headless-launch');
 const { readJsonFile } = require('./shared/json-file');
 const { readPrDeclarationEvidence } = require('./shared/pr-declaration');
+const { createPrComment, ghErrorDetail } = require('./shared/gh-comments');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const processLiveness = require('./shared/process-liveness');
 const {
@@ -954,28 +955,20 @@ function notifyManifestProblem({ workspace, pr, repo, commentBody, failureLabel,
     return { notifiable: true, skipped: true, posted: false, commentUrl: null, error: null, sentinelPath };
   }
 
-  // 長文の通知コメントで Windows の argv 上限に当たらないよう --body-file - と stdin で渡す。
-  const ghArgs = ['pr', 'comment', notifyPr, '--repo', repo, '--body-file', '-'];
-  const ghOpts = { encoding: 'utf8', stdio: 'pipe', input: String(commentBody ?? '') };
+  // 長文の通知コメントで Windows の argv 上限に当たらないよう、共有ヘルパー経由で --body-file - と stdin を使って投稿する。
+  const result = createPrComment(repo, notifyPr, commentBody, {
+    ghForTest: _ghForTest,
+    respectTestContextGuard: true,
+  });
 
-  let result;
-  if (_ghForTest) {
-    result = _ghForTest(ghArgs, ghOpts);
-  } else if (process.env.NODE_TEST_CONTEXT) {
-    result = { status: 1, stdout: '', stderr: 'テスト実行中（NODE_TEST_CONTEXT）のため、実際のGitHub投稿は行いません' };
-  } else {
-    const r = spawnSync('gh', ghArgs, ghOpts);
-    result = { status: r.status, stdout: r.stdout || '', stderr: r.stderr || (r.error ? r.error.message : '') };
-  }
-
-  if (result.status === 0) {
+  if (result && result.status === 0) {
     // 投稿成功時のみ「通知済み」センチネルを作成する
     const written = writeSentinel(workspace, notifyPr);
     return {
       notifiable: true,
       skipped: false,
       posted: true,
-      commentUrl: String(result.stdout).trim(),
+      commentUrl: String(result.stdout || '').trim(),
       error: null,
       sentinelPath: written || sentinelPath,
     };
@@ -985,7 +978,8 @@ function notifyManifestProblem({ workspace, pr, repo, commentBody, failureLabel,
   // 作り、監督側（superviseReviewManager）が exit 0 の不完全完了ではなく失敗として観測できる
   // 状態を残す。冪等ガードは reason 'incomplete-review' のみスキップするため、次回実行時に
   // 再投稿される（回復経路）。
-  const postError = String(result.stderr).trim() || `gh pr comment 失敗（status ${result.status}）`;
+  const statusLabel = result ? result.status : 'unknown';
+  const postError = ghErrorDetail(result, { fallback: `gh pr comment 失敗（status ${statusLabel}）` });
   const failedSentinel = writeSentinel(workspace, notifyPr, {
     reason: 'notify-failed',
     postError,

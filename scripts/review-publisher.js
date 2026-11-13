@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./shared/child-process');
+const { ghApiWithBody, ghErrorDetail } = require('./shared/gh-comments');
 const { parseJsonText } = require('./shared/json-file');
 const { reviewResultMarker } = require('./shared/review-result-marker');
 const { reviewFindingMarker } = require('./shared/review-finding-marker');
@@ -202,12 +203,16 @@ function formatFinalReviewBody({ posted, unresolved, rejected }) {
   return lines.join('\n');
 }
 
+function assertZeroExit(commandDesc, result) {
+  if (!result || result.status !== 0) {
+    const detail = ghErrorDetail(result, { includeStdout: true, fallback: '' });
+    throw new Error(`${commandDesc} failed: ${detail}`);
+  }
+}
+
 function runRequired(command, args, opts = {}, spawnFn = spawnSync) {
   const result = spawnFn(command, args, { encoding: 'utf8', ...opts });
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || (result.error && result.error.message) || '').trim();
-    throw new Error(`${command} ${args.join(' ')} failed: ${detail}`);
-  }
+  assertZeroExit(`${command} ${args.join(' ')}`, result);
   return result.stdout;
 }
 
@@ -216,16 +221,11 @@ function loadFileAtCommit(headRefOid, filePath, cwd) {
 }
 
 /**
- * 長文の本文が Windows の argv 上限に当たらないよう、body は `-F body=@-` と stdin 経由で渡す。
+ * 長文の本文が Windows の argv 上限に当たらないよう、共有ヘルパー `ghApiWithBody`（`-F body=@-` + stdin + 共通 timeout）へ委譲する。
  */
 function postGhApiWithBody(endpoint, body, extraArgs, spawnFn = spawnSync) {
-  runRequired('gh', [
-    'api',
-    endpoint,
-    '-X', 'POST',
-    '-F', 'body=@-',
-    ...extraArgs,
-  ], { input: String(body ?? '') }, spawnFn);
+  const result = ghApiWithBody(endpoint, body, extraArgs, { spawnSyncFn: spawnFn });
+  assertZeroExit(`gh api ${endpoint} -X POST -F body=@-${extraArgs.length ? ` ${extraArgs.join(' ')}` : ''}`, result);
 }
 
 function postInlineComment(payload, finding, spawnFn = spawnSync) {

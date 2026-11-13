@@ -332,7 +332,7 @@ test('slow: finalize-review.js は実プロセス境界で 32KB超の日本語�
       summary: `日本語の指摘要約-${i}`,
       severity: 'MAJOR',
       severity_rationale: `理由-${i}`,
-      body: '日本語本文詳細。'.repeat(12),
+      body: `詳細本文-${i}: 日本語の根拠説明。`.repeat(12),
       verified_references: [`src/file-${i}.js`],
     }));
     const results = {
@@ -372,16 +372,47 @@ test('slow: finalize-review.js は実プロセス境界で 32KB超の日本語�
     assert.equal(recorded.length, 1);
     const posted = recorded[0].body;
     assert.ok(Buffer.byteLength(posted, 'utf8') > 32768, `32KB超のはず: ${Buffer.byteLength(posted, 'utf8')}`);
-    assert.ok(posted.includes('## ⚠️ 不完全レビュー'));
-    assert.ok(posted.includes('correctness/logic-invariants'));
-    assert.ok(posted.includes('correctness/api-contract'));
-    const expectedDetail = '日本語本文詳細。'.repeat(12);
-    for (let i = 0; i < findings.length; i++) {
-      assert.ok(posted.includes(`src/file-${i}.js`), `missing path ${i}`);
-      assert.ok(posted.includes(`日本語の指摘要約-${i}`), `missing summary ${i}`);
-      assert.ok(posted.includes(`anchor_${i}()`), `missing anchor ${i}`);
-      assert.ok(posted.includes(expectedDetail), `missing detail body ${i}`);
-    }
+    const expectedFindingsSection = [
+      '## ⚠️ 不完全レビュー',
+      '',
+      'このレビューは**不完全**です。以下の理由により、正式なReview Managerレビュー完了とはみなされません。',
+      '',
+      '---',
+      '',
+      '### 成功した葉',
+      '',
+      '- **correctness/logic-invariants**: 120件の所見',
+      '',
+      '### 最後の実行で成功したジョブの指摘',
+      '',
+      '最終スナップショットの成功ジョブから集約（120 件）。',
+      '',
+      ...findings.flatMap((f) => [
+        '<details>',
+        `<summary><b>[${f.severity}] [${f.aspect}] ${f.path}</b> — ${f.summary}</summary>`,
+        '',
+        `行アンカー: \`${f.line_anchor}\``,
+        `判定根拠: ${f.severity_rationale}`,
+        `参照: ${f.verified_references.join(', ')}`,
+        '',
+        f.body,
+        '',
+        '</details>',
+        '',
+      ]),
+      '',
+      '### 失敗/未完了の葉',
+      '',
+      '- **correctness/api-contract**: timeout',
+      '',
+      '### 除外した葉',
+      '',
+      '（なし）',
+    ].join('\n');
+    const [actualBeforeReasons, actualReasonsAndFooter] = posted.split('\n\n### 完全性ゲート不合格理由\n\n');
+    assert.equal(actualBeforeReasons, expectedFindingsSection);
+    assert.match(actualReasonsAndFooter, /adopted leaf correctness\/api-contract has only failed job results/);
+    assert.match(actualReasonsAndFooter, /_最終更新: \d{4}-\d{2}-\d{2}T/);
   });
 });
 

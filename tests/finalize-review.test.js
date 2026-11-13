@@ -493,15 +493,19 @@ test('aggregateFindings accepts Test Quality aspect findings and validates schem
 
 function loadFinalizeReviewWithSpawn(fakeSpawnSync) {
   const cpPath = require.resolve('../scripts/shared/child-process');
+  const gcPath = require.resolve('../scripts/shared/gh-comments');
   const frPath = require.resolve('../scripts/finalize-review');
   const savedCp = require.cache[cpPath];
+  const savedGc = require.cache[gcPath];
   const savedFr = require.cache[frPath];
   require.cache[cpPath] = { id: cpPath, filename: cpPath, loaded: true, exports: { spawnSync: fakeSpawnSync } };
+  delete require.cache[gcPath];
   delete require.cache[frPath];
   try {
     return require(frPath);
   } finally {
     if (savedCp) require.cache[cpPath] = savedCp; else delete require.cache[cpPath];
+    if (savedGc) require.cache[gcPath] = savedGc; else delete require.cache[gcPath];
     if (savedFr) require.cache[frPath] = savedFr; else delete require.cache[frPath];
   }
 }
@@ -554,6 +558,30 @@ test('finalizeReview(incomplete): 実 child-process 境界で 32KB超の日本�
       assert.ok(calls[0].opts.input.includes('日本語の指摘要約-119'));
     } finally {
       if (savedTestCtx !== undefined) process.env.NODE_TEST_CONTEXT = savedTestCtx;
+    }
+  });
+});
+
+test('finalizeReview(incomplete): stderr が空で spawn error だけがある場合も error.message を commentError とセンチネルへ残す', async () => {
+  await withTempDir('fr-err-', async (tmpDir) => {
+    const resultsPath = path.join(tmpDir, 'results.json');
+    fs.writeFileSync(resultsPath, JSON.stringify({
+      manifest_ref: { pr: 6, repo: 'o/r', headRefOid: 'abc' },
+      coverage_ledger: {
+        leaves: [{ id: 'correctness/api-contract', trunk: 'Correctness', decision: 'adopted', rationale: null }],
+      },
+      jobs: [{ id: 'job-1', status: 'failed', leaf_ids: ['correctness/api-contract'], error: 'timeout', findings: [] }],
+    }), 'utf8');
+
+    _setGhForTest(() => ({ status: null, stdout: '', stderr: '', error: new Error('spawnSync gh EPIPE') }));
+    try {
+      const res = await finalizeReview(resultsPath, 'incomplete', null, tmpDir);
+      assert.equal(res.ok, false);
+      assert.match(res.summary.error, /spawnSync gh EPIPE/);
+      const sentinel = JSON.parse(fs.readFileSync(res.summary.sentinelPath, 'utf8'));
+      assert.equal(sentinel.postError, 'spawnSync gh EPIPE');
+    } finally {
+      _setGhForTest(null);
     }
   });
 });

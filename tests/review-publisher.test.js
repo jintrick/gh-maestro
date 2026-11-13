@@ -363,6 +363,12 @@ test('postInlineComment / postFileComment / postFinalReview: 32KB超の日本語
     assert.equal(call.command, 'gh');
     assert.ok(call.args.join(' ').length < 512, 'argv に長文本文を含めない');
     assert.equal(call.options.encoding, 'utf8');
+    assert.equal(call.options.timeout, 30000);
     assert.ok(Buffer.byteLength(call.options.input, 'utf8') > 32768);
   }
+
+  assert.throws(
+    () => postFinalReview(payload, 'x', () => ({ status: null, stdout: '', stderr: '', error: new Error('spawnSync gh EPIPE') })),
+    /spawnSync gh EPIPE/
+  );
 });

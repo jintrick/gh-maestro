@@ -1907,15 +1907,19 @@ test('runJobsFromManifest: 取得した申告表は実際に組み立てられ�
 
 function loadRunReviewJobsWithSpawn(fakeSpawnSync) {
   const cpPath = require.resolve('../scripts/shared/child-process');
+  const gcPath = require.resolve('../scripts/shared/gh-comments');
   const rrjPath = require.resolve('../scripts/run-review-jobs');
   const savedCp = require.cache[cpPath];
+  const savedGc = require.cache[gcPath];
   const savedRrj = require.cache[rrjPath];
   require.cache[cpPath] = { id: cpPath, filename: cpPath, loaded: true, exports: { spawn: () => {}, spawnSync: fakeSpawnSync } };
+  delete require.cache[gcPath];
   delete require.cache[rrjPath];
   try {
     return require(rrjPath);
   } finally {
     if (savedCp) require.cache[cpPath] = savedCp; else delete require.cache[cpPath];
+    if (savedGc) require.cache[gcPath] = savedGc; else delete require.cache[gcPath];
     if (savedRrj) require.cache[rrjPath] = savedRrj; else delete require.cache[rrjPath];
   }
 }

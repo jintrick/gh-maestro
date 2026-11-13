@@ -823,3 +823,42 @@ test('declareTestResult: 既定実装は 32KB超の日本語を含む本文で�
     assert.equal(writeCall.opts.input, expectedBody);
   }
 });
+
+test('declareTestResult: stderr が空で spawn error だけがある場合も error.message を失敗理由へ残す', () => {
+  const { declareTestResult: dtr } = loadDeclareTestResultWithSpawn(() => ({
+    status: null,
+    stdout: '',
+    stderr: '',
+    error: new Error('spawnSync gh EPIPE'),
+  }));
+
+  const artifact = {
+    provenance: 'test-runner',
+    scope: 'full',
+    outcome: 'pass',
+    tests: 1,
+    pass: 1,
+    fail: 0,
+    testedContentHash: CONTENT_HASH,
+  };
+  for (const mode of ['create', 'update']) {
+    const res = dtr(
+      { pr: '42', repo: 'owner/repo', headSha: SHA },
+      {
+        gitHeadFn: () => SHA,
+        readTestResultFn: () => ({ ok: true, result: artifact }),
+        commitContentHashFn: () => CONTENT_HASH,
+        ghListCommentsFn: () => ({
+          status: 0,
+          stdout: mode === 'create'
+            ? '[]'
+            : JSON.stringify([{ id: 777, body: `${TEST_RESULT_MARKER}\nold` }]),
+          stderr: '',
+        }),
+      },
+    );
+    assert.equal(res.ok, false);
+    assert.match(res.error, /spawnSync gh EPIPE/, `${mode}: error.message が含まれる`);
+    assert.doesNotMatch(res.error, /\(no stderr\)/);
+  }
+});

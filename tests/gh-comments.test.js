@@ -169,3 +169,49 @@ test('createComment / updateComment: opts.spawnSyncFn が指定されたら既�
   assert.equal(customCalls[0].opts.input, '本文A');
   assert.equal(customCalls[1].opts.input, '本文B');
 });
+
+test('ghApiWithBody: endpoint・extraArgs・stdin・共通 timeout を組み立てる', () => {
+  const calls = [];
+  const res = ghComments.ghApiWithBody('repos/o/r/pulls/9/comments', '指摘本文', ['-f', 'event=COMMENT'], {
+    spawnSyncFn: (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      return { status: 0, stdout: '{}' };
+    },
+  });
+  assert.equal(res.status, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'gh');
+  assert.deepEqual(calls[0].args, ['api', 'repos/o/r/pulls/9/comments', '-X', 'POST', '-F', 'body=@-', '-f', 'event=COMMENT']);
+  assert.equal(calls[0].opts.timeout, ghComments.GH_TIMEOUT_MS);
+  assert.equal(calls[0].opts.encoding, 'utf8');
+  assert.equal(calls[0].opts.input, '指摘本文');
+});
+
+test('createPrComment / ghErrorDetail: PRコメントを stdin 経由で投稿し、stderr 空時は error.message を返す', () => {
+  const calls = [];
+  const ok = ghComments.createPrComment('o/r', 15, 'PRコメント本文', {
+    spawnSyncFn: (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      return { status: 0, stdout: 'https://github.com/o/r/pull/15#issuecomment-1\n', stderr: '' };
+    },
+  });
+  assert.equal(ok.status, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'gh');
+  assert.deepEqual(calls[0].args, ['pr', 'comment', '15', '--repo', 'o/r', '--body-file', '-']);
+  assert.equal(calls[0].opts.timeout, ghComments.GH_TIMEOUT_MS);
+  assert.equal(calls[0].opts.stdio, 'pipe');
+  assert.equal(calls[0].opts.input, 'PRコメント本文');
+
+  const blocked = ghComments.createPrComment('o/r', 15, '本文', { respectTestContextGuard: true });
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /NODE_TEST_CONTEXT/);
+
+  const epipe = ghComments.createPrComment('o/r', 15, '本文', {
+    spawnSyncFn: () => ({ status: null, stdout: '', stderr: '', error: new Error('write EPIPE') }),
+  });
+  assert.equal(epipe.stderr, 'write EPIPE');
+  assert.equal(ghComments.ghErrorDetail({ status: null, stderr: '', error: new Error('spawn ETIMEDOUT') }), 'spawn ETIMEDOUT');
+  assert.equal(ghComments.ghErrorDetail({ status: 1, stderr: '  stderr err \n', error: new Error('ignored') }), 'stderr err');
+  assert.equal(ghComments.ghErrorDetail({ status: 1, stderr: '' }, { fallback: '(fallback)' }), '(fallback)');
+});
