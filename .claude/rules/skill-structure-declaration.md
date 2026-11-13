@@ -6,18 +6,22 @@ paths:
   - "skills/gh-maestro-orchestrator/retrospective.md"
   - "skills/gh-maestro-orchestrator/lightweight-pr.md"
   - "skills/gh-maestro-orchestrator/premise-check.md"
+  - "skills/gh-maestro-orchestrator/premise-check-stage-1.md"
+  - "skills/gh-maestro-orchestrator/premise-check-stage-5.md"
+  - "skills/gh-maestro-orchestrator/premise-check-stage-7.md"
   - "tests/orchestrator-step-numbering.test.js"
 ---
 
 # 工程の構造宣言を更新する
 
-`skills/gh-maestro-orchestrator/SKILL.md` は工程1〜9の骨格、`stage-<N>-*.md` は各工程の手順を持つ。SKILL.md 冒頭の `<!-- gh-maestro-structure: stages=9 -->` は工程数、各工程見出し直下の `middle-items=N` はその工程の中項目数を宣言する。工程・中項目の増減時は同じ変更で宣言を更新する。
+`skills/gh-maestro-orchestrator/SKILL.md` は工程1〜9の骨格、`stage-<N>-*.md` は各工程のスキル断片を持つ。SKILL.md 冒頭の `<!-- gh-maestro-structure: stages=9 -->` は工程数、各工程見出し直下の `middle-items=N` はその工程の中項目数を宣言する。工程・中項目の増減時は同じ変更で宣言を更新する。
 
 中項目は、SKILL.mdの骨格上で番号と必須／任意を示し、詳細手順は対応stageファイルに置く。PR_PUSH後のexplorer確認など、工程内の必須作業は工程の番号付き中項目として数える。
 
-stage-1〜9、`triage.md`、`retrospective.md`、`lightweight-pr.md`、`premise-check.md` の13手順書は先頭front matterで配信合図を宣言する。`signals: - none` はstage-1だけに使う。`premise-check.md` は計画評価（`PLAN_REPORTED`）とレビュー対応（`PR_REVIEW`・`REVIEW_COMMENT`）の両方で配信する。通知名はSKILL.mdの「イベントの受け口」に存在し、script合図は実在する`scripts/` CLIが共有配信関数を呼ぶこと。
+stage-1〜9、`triage.md`、`retrospective.md`、`lightweight-pr.md`、`premise-check.md`、`premise-check-stage-5.md`、`premise-check-stage-7.md` の15スキル断片は先頭front matterで配信合図を宣言する。`signals: - none` はstage-1だけに使う。`premise-check.md`（共通の定義）は `PLAN_REPORTED` と `PR_REVIEW`・`REVIEW_COMMENT`、`premise-check-stage-5.md` は `PLAN_REPORTED`、`premise-check-stage-7.md` は `PR_REVIEW`・`REVIEW_COMMENT` を宣言する。`premise-check-stage-1.md` は合図を持たず `stage-1-requirements.md` から参照する。通知名はSKILL.mdの「イベントの受け口」に存在し、script合図は実在する`scripts/` CLIが共有配信関数を呼ぶこと。
+理由と経緯: docs/adr/0064-skill-fragments-split-per-signal.md
 
-`tests/orchestrator-step-numbering.test.js` は工程・中項目の数に加え、13手順書の存在・合図宣言、通知名、script CLIと共有関数、各合図で生成する追加文脈の9,000文字上限を検証する。数字やテスト期待値を、削除後の実体に合わせて無批判に縮めない。
+`tests/orchestrator-step-numbering.test.js` は工程・中項目の数に加え、15スキル断片の存在・合図宣言、通知名、script CLIと共有関数、各合図で届くスキル断片の9,000文字上限を検証する。数字やテスト期待値を、削除後の実体に合わせて無批判に縮めない。
 
 **テストが落ちたとき、宣言の数字を実体に合わせて辻褄を合わせない。** 工程を意図して増減したのなら宣言と中項目を更新する。意図していないなら、消えた工程の方を戻す。宣言は工程の欠落を検出するためにある。
 
