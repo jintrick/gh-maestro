@@ -5,13 +5,14 @@
 // Claude Code は同一イベントに一致する hook handler を並列実行するため、legacy inspection・
 // setup・reset・context を別々の handler として登録すると、整理処理の
 // 前後で検査結果とcontextがずれる競合が起きる。ここでは兄弟CLIを同期実行し、
-// 全段階の成功後だけ stdout をhookへ返す。
+// 全段階の成功後はコンテキストを、途中失敗時は失敗段階と理由だけをstdoutへ返す。
 
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./shared/child-process');
 const { parseFlags, resolveWorkspace } = require('./shared/workspace');
 const { parseJsonText } = require('./shared/json-file');
+const { stripAnsi } = require('./shared/strip-ansi');
 const { markOrchestratorSession } = require('./orchestrator-stop-hook');
 
 const USAGE = `gh-maestro-session-hook.js — /gh-maestro のセッション開始hook
@@ -31,8 +32,10 @@ Options:
   5. 標準入力のhook入力JSONにある session_id を、orchestratorセッションとして記録する
      （orchestrator-stop-hook.js が通知の対象を見分けるため。標準入力がTTYなら省略）
 
-全段階が終了コード0のときだけ、各段階のstdoutをこのhookのstdoutへ出力する。
-途中で失敗した場合は後続段階を実行せず、stdoutを出力しない。
+全段階が終了コード0のとき、各段階のstdout（[gh-maestro session context] 等）をこのhookのstdoutへ出力する。
+途中で失敗した場合は後続段階を実行せず、セッション情報出力およびorchestratorセッション記録を行わない。
+代わりに失敗した段階名と理由（[gh-maestro session hook failed]）をstdoutへ出力し、終了コード0で終了する
+（UserPromptExpansion hookが失敗理由をorchestratorのコンテキストへ届けるため）。
 5の記録に失敗しても警告を出すだけで、セッション開始は失敗させない。`;
 
 const SPEC = {
@@ -76,6 +79,93 @@ function formatStageFailure(stage, result, error) {
   const detail = error ? error.message : '';
   const suffix = detail ? `: ${detail}` : '';
   return `gh-maestro-session-hook: ${stage.name} failed (exit ${exitCodeFromResult(result)})${suffix}\n`;
+}
+
+const MAX_FAILURE_REASON_LINES = 20;
+const MAX_FAILURE_REASON_CHARS = 1500;
+const FAILURE_REASON_TRUNCATED_NOTE = '  ... (truncated; full stderr was sent to stderr/debug log)';
+const RESERVED_CONTEXT_KEY_RE = /(^|\s)(SESSION_ID|REPO|WORKSPACE|BASE_BRANCH|GH_MAESTRO_WORKER|TEST_LAYERS_STATUS|CONFIG_JSON_BROKEN|BASE_BRANCH_STATUS|GH_MAESTRO_INSTALL_STATUS|FAILED_STAGE)=.*/g;
+const RESERVED_BLOCK_HEADER_RE = /\[gh-maestro\s+session[^\]]*\]/gi;
+const ANSI_NON_SGR_RE = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-9;?]*[ -/]*[@-~])/g;
+const CONTROL_CHARS_EXCEPT_LF_RE = /[\x00-\x09\x0b-\x1f\x7f-\x9f]/g;
+
+function sanitizeSingleLineText(value) {
+  return stripAnsi(outputText(value))
+    .replace(ANSI_NON_SGR_RE, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(CONTROL_CHARS_EXCEPT_LF_RE, '')
+    .trim();
+}
+
+function sanitizeFailureReasonLines(rawStderr) {
+  const normalized = stripAnsi(outputText(rawStderr))
+    .replace(ANSI_NON_SGR_RE, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(CONTROL_CHARS_EXCEPT_LF_RE, '');
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== '')
+    .map((line) => line
+      .replace(RESERVED_BLOCK_HEADER_RE, '(redacted session marker)')
+      .replace(RESERVED_CONTEXT_KEY_RE, '$1[redacted:$2]'));
+
+  return lines;
+}
+
+/**
+ * 段階失敗時に orchestrator のコンテキストへ渡す失敗報告を整形する。
+ *
+ * UserPromptExpansion hook の stdout は終了コード 0 のときだけコンテキストへ加わる。
+ * 失敗段階名と、制御文字・予約コンテキストキー/見出しを無害化して字下げ・上限適用した
+ * 理由だけを出力し、SESSION_ID を含むセッション情報は含めない。
+ *
+ * @param {object|null|undefined} result
+ * @returns {string}
+ */
+function formatFailureContext(result) {
+  const failedStage = sanitizeSingleLineText(result && result.failedStage) || 'unknown';
+  const exitCode = result && Number.isInteger(result.exitCode) && result.exitCode > 0
+    ? result.exitCode
+    : 1;
+  const sanitizedLines = sanitizeFailureReasonLines(result && result.stderr);
+  const sourceLines = sanitizedLines.length > 0
+    ? sanitizedLines
+    : [`${failedStage} failed (exit ${exitCode})`];
+
+  const boundedLines = [];
+  let remainingChars = MAX_FAILURE_REASON_CHARS;
+  let truncated = sourceLines.length > MAX_FAILURE_REASON_LINES;
+
+  for (const line of sourceLines.slice(0, MAX_FAILURE_REASON_LINES)) {
+    const separatorCost = boundedLines.length > 0 ? 1 : 0;
+    if (remainingChars <= separatorCost) {
+      truncated = true;
+      break;
+    }
+    const budget = remainingChars - separatorCost;
+    if (line.length <= budget) {
+      boundedLines.push(`  ${line}`);
+      remainingChars -= separatorCost + line.length;
+    } else {
+      boundedLines.push(`  ${line.slice(0, budget)}`);
+      truncated = true;
+      break;
+    }
+  }
+
+  if (truncated) {
+    boundedLines.push(FAILURE_REASON_TRUNCATED_NOTE);
+  }
+
+  return [
+    '[gh-maestro session hook failed]',
+    `FAILED_STAGE=${failedStage}`,
+    'REASON:',
+    ...boundedLines,
+    '',
+  ].join('\n');
 }
 
 /**
@@ -217,8 +307,12 @@ function main(argv = process.argv.slice(2), options = {}) {
 
   const result = (options.runSessionHookFn || runSessionHook)(workspace, options);
   if (!result || result.ok !== true) {
+    // UserPromptExpansion hook がコンテキストへ stdout を追加するのは終了コード 0 のときだけである。
+    // 失敗した段階名と理由を orchestrator へ届けるため、セッション情報や session_id 記録は行わず、
+    // 失敗報告だけを stdout へ出して終了コード 0 で終える。
     if (result) writeStderr(outputText(result.stderr));
-    return result && Number.isInteger(result.exitCode) ? result.exitCode : 1;
+    writeStdout(formatFailureContext(result));
+    return 0;
   }
 
   // contextを含むstdoutは、全段階成功後にだけ出力する。
@@ -231,7 +325,11 @@ function main(argv = process.argv.slice(2), options = {}) {
 module.exports = {
   USAGE,
   SPEC,
+  MAX_FAILURE_REASON_LINES,
+  MAX_FAILURE_REASON_CHARS,
+  FAILURE_REASON_TRUNCATED_NOTE,
   stageDefinitions,
+  formatFailureContext,
   runSessionHook,
   recordOrchestratorSession,
   main,

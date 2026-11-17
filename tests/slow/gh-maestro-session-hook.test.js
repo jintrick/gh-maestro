@@ -301,6 +301,78 @@ test('CLI通し: 旧sessionIdを置いた一時workspaceでreset後のSESSION_ID
   }
 });
 
+test('CLI通し: devが無く別ブランチにコミット前の変更があるworkspaceでも作業ツリーを切り替えずsession contextを返す', () => {
+  const workspace = createWorkspace();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-nocheckout-bin-'));
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-nocheckout-runtime-'));
+  try {
+    runGit(workspace, 'branch', '-D', 'dev');
+    runGit(workspace, 'push', '-q', 'origin', '--delete', 'dev');
+    runGit(workspace, 'checkout', '-qb', 'ui/design-system');
+    fs.writeFileSync(path.join(workspace, 'README.md'), 'feature-base\n', 'utf8');
+    runGit(workspace, 'add', 'README.md');
+    runGit(workspace, 'commit', '-qm', 'feature commit');
+    fs.writeFileSync(path.join(workspace, 'README.md'), 'uncommitted-wip\n', 'utf8');
+    fs.writeFileSync(path.join(workspace, 'wip.txt'), 'wip-content\n', 'utf8');
+
+    const fakeGh = createFakeGh(binDir);
+    const result = runHook(workspace, hookEnv(binDir, runtimeDir, fakeGh));
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /\[gh-maestro session context\]/);
+    assert.match(result.stdout, /^SESSION_ID=.+$/m);
+    assert.match(result.stdout, /^BASE_BRANCH=ui\/design-system$/m);
+    assert.equal(runGit(workspace, 'branch', '--show-current').stdout.trim(), 'ui/design-system');
+    assert.equal(fs.readFileSync(path.join(workspace, 'README.md'), 'utf8'), 'uncommitted-wip\n');
+    assert.equal(fs.readFileSync(path.join(workspace, 'wip.txt'), 'utf8'), 'wip-content\n');
+    assert.equal(
+      runGit(workspace, 'rev-parse', 'dev').stdout.trim(),
+      runGit(workspace, 'rev-parse', 'main').stdout.trim(),
+    );
+  } finally {
+    removeDirectory(workspace);
+    removeDirectory(binDir);
+    removeDirectory(runtimeDir);
+  }
+});
+
+test('CLI通し: 段階失敗時は終了コード0で失敗段階と理由をstdoutへ出力しSESSION_IDを出さず記録もしない', () => {
+  const workspace = createWorkspace('old-session-id');
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-failctx-bin-'));
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-failctx-runtime-'));
+  try {
+    runGit(workspace, 'branch', '-D', 'dev');
+    runGit(workspace, 'push', '-q', 'origin', '--delete', 'dev');
+    runGit(workspace, 'branch', '-m', 'main', 'feature');
+
+    const fakeGh = createFakeGh(binDir);
+    const result = spawnSync(process.execPath, ['-r', FAST_SESSION_PRELOAD, SCRIPT, '--workspace', workspace], {
+      cwd: workspace,
+      env: hookEnv(binDir, runtimeDir, fakeGh),
+      input: JSON.stringify({ session_id: 'new-claude-session-id' }),
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^\[gh-maestro session hook failed\]/m);
+    assert.match(result.stdout, /^FAILED_STAGE=gh-maestro-setup\.js$/m);
+    assert.match(result.stdout, /'main' と 'master' のどちらも見つかりませんでした/);
+    assert.doesNotMatch(result.stdout, /\[gh-maestro session context\]/);
+    assert.doesNotMatch(result.stdout, /SESSION_ID=/);
+    assert.doesNotMatch(result.stdout, /old-session-id/);
+    assert.doesNotMatch(result.stdout, /\x1b\[/);
+
+    const stateResult = readStateLib.readState(workspace, 'orchestrator');
+    assert.equal(stateResult.status, 'ok');
+    assert.equal(stateResult.state.sessionId, 'old-session-id',
+      '失敗時はstdinのsession_idでorchestratorセッションを更新しないこと');
+  } finally {
+    removeDirectory(workspace);
+    removeDirectory(binDir);
+    removeDirectory(runtimeDir);
+  }
+});
+
 test('CLI通し: 生存中のworker-supervisorを維持したままhookがreset・再起動を完了する', async () => {
   const workspace = createWorkspace();
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-resident-bin-'));
