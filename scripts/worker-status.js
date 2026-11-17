@@ -20,6 +20,7 @@ const { resolveSkillAgentMap } = require('./shared/resolve-config');
 const { listRunningReviewManagers } = require('./shared/running-review-managers');
 const { deriveRoleFromSkill } = require('./shared/worker-factory');
 const { formatElapsedTime } = require('./shared/worker-report-check');
+const { stripAnsi } = require('./shared/strip-ansi');
 const {
   INTERVALS,
   readCycleEvents,
@@ -523,10 +524,6 @@ function renderUptimeBars(workers, opts = {}) {
     lines.push(line);
   }
   return lines;
-}
-
-function stripAnsi(text) {
-  return String(text).replace(/\x1b\[[0-9;]*m/g, '');
 }
 
 function visibleLength(text) {

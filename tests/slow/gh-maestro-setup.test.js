@@ -291,6 +291,40 @@ test('既定ブランチがmainの場合はmainからdevブランチを作成す
   });
 });
 
+test('devブランチが無く別ブランチにコミット前の変更があっても、作業ブランチを切り替えず変更に触れずにdevを作成する', () => {
+  withGitProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    setBareOriginHead('main');
+
+    gitIn(dir, 'checkout', '-qb', 'ui/design-system');
+    fs.writeFileSync(path.join(dir, 'README.md'), 'feature-base\n', 'utf8');
+    gitIn(dir, 'add', 'README.md');
+    gitIn(dir, 'commit', '-qm', 'feature commit');
+
+    fs.writeFileSync(path.join(dir, 'README.md'), 'uncommitted-edit\n', 'utf8');
+    fs.writeFileSync(path.join(dir, 'staged.txt'), 'staged-content\n', 'utf8');
+    gitIn(dir, 'add', 'staged.txt');
+    fs.writeFileSync(path.join(dir, 'untracked.txt'), 'untracked-content\n', 'utf8');
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(gitIn(dir, 'branch', '--show-current').stdout.trim(), 'ui/design-system');
+    assert.equal(
+      gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
+      gitIn(dir, 'rev-parse', 'main').stdout.trim(),
+      'devは作業ブランチではなくmainから作成されること',
+    );
+    assert.notEqual(
+      gitIn(dir, 'ls-remote', '--heads', 'origin', 'dev').stdout.trim(),
+      '',
+      'origin/devがpushされること',
+    );
+    assert.equal(fs.readFileSync(path.join(dir, 'README.md'), 'utf8'), 'uncommitted-edit\n');
+    assert.equal(gitIn(dir, 'diff', '--cached', '--name-only').stdout.trim(), 'staged.txt');
+    assert.equal(fs.readFileSync(path.join(dir, 'untracked.txt'), 'utf8'), 'untracked-content\n');
+  });
+});
+
 test('mainとmasterの両方がある場合はdevを作成せず停止する', () => {
   withGitProject((dir) => {
     prepareProjectWithoutDev(dir, 'main');

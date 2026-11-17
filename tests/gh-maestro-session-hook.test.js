@@ -378,17 +378,56 @@ test('main: 全段階成功後に orchestrator セッションを記録し、記
   assert.deepEqual(out, ['SESSION_ID=x\n', 'SESSION_ID=x\n']);
 });
 
-test('main: 段階が失敗したときは orchestrator セッションを記録しない', () => {
+test('main: 段階が失敗したときは終了コード0で失敗ブロックをstdoutへ出力し、セッション情報を出さず記録もしない', () => {
   const { main } = require('../scripts/gh-maestro-session-hook');
+  const out = [];
+  const err = [];
   let marked = false;
   const code = main(['--workspace', path.join(__dirname, 'fixture-session-hook-workspace')], {
-    runSessionHookFn: () => ({ ok: false, exitCode: 1, stdout: '', stderr: 'failed\n' }),
-    writeStdoutFn: () => {},
-    writeStderrFn: () => {},
+    runSessionHookFn: () => ({
+      ok: false,
+      exitCode: 1,
+      failedStage: 'gh-maestro-setup.js',
+      stdout: '',
+      stderr: 'gh-maestro-session-hook: gh-maestro-setup.js failed (exit 1)\n  \x1b[31mx failure reason\x1b[0m\n',
+    }),
+    writeStdoutFn: (v) => out.push(v),
+    writeStderrFn: (v) => err.push(v),
     isStdinTTY: () => false,
     readStdinFn: () => '{"session_id":"claude-1"}',
     markSessionFn: () => { marked = true; },
   });
-  assert.equal(code, 1);
+  const stdout = out.join('');
+  assert.equal(code, 0);
   assert.equal(marked, false);
+  assert.match(stdout, /^\[gh-maestro session hook failed\]/m);
+  assert.match(stdout, /^FAILED_STAGE=gh-maestro-setup\.js$/m);
+  assert.match(stdout, /x failure reason/);
+  assert.doesNotMatch(stdout, /\x1b\[/);
+  assert.doesNotMatch(stdout, /SESSION_ID=/);
+  assert.doesNotMatch(stdout, /\[gh-maestro session context\]/);
+  assert.match(err.join(''), /gh-maestro-setup\.js failed/);
+});
+
+test('main: 段階失敗時にstderrが空でも失敗段階名と既定理由をstdoutへ出力する', () => {
+  const { main } = require('../scripts/gh-maestro-session-hook');
+  const out = [];
+  const code = main(['--workspace', path.join(__dirname, 'fixture-session-hook-workspace')], {
+    runSessionHookFn: () => ({
+      ok: false,
+      exitCode: 2,
+      failedStage: 'reset-session.js',
+      stdout: '',
+      stderr: '',
+    }),
+    writeStdoutFn: (v) => out.push(v),
+    writeStderrFn: () => {},
+    isStdinTTY: () => true,
+  });
+  const stdout = out.join('');
+  assert.equal(code, 0);
+  assert.match(stdout, /^\[gh-maestro session hook failed\]/m);
+  assert.match(stdout, /^FAILED_STAGE=reset-session\.js$/m);
+  assert.match(stdout, /reset-session\.js failed \(exit 2\)/);
+  assert.doesNotMatch(stdout, /SESSION_ID=/);
 });

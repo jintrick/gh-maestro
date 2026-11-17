@@ -5,6 +5,21 @@ description: gh-maestroセッションをこのワークスペースで起動す
 
 ## 起動
 
+起動コンテキストに `[gh-maestro session hook failed]` があるか `[gh-maestro session context]` があるかを最初に確認し、結果に応じて分岐する。
+
+### 起動フックが失敗した場合
+
+コンテキストに `[gh-maestro session hook failed]` が含まれている場合、セッション情報の生成は途中で止まっており、`$WORKSPACE`・`$REPO`・`$BASE_BRANCH`・`$SESSION_ID` は存在しない。以下の確認手順（sweep・Issue一覧等）や `gh-maestro-orchestrator` の通常運用へ進んではならない。
+
+次の4点を人間へ明確に伝えて、その場で起動を終了する。
+
+1. **失敗した段階**: `FAILED_STAGE` に記載されたスクリプト名
+2. **失敗の理由**: `REASON` に記載されたエラー内容
+3. **人間が取るべき対処**: 理由から特定できる具体的な復旧手順や確認事項
+4. **再実行の案内**: 対処を完了したうえで `/gh-maestro` を再実行すること
+
+### セッション情報が揃っている場合
+
 起動時に人間へ伝えるのは、人間がこれから作業を始めるのに役立つことと、gh-maestro の動作に悪影響があることだけである。以下の検査は、その判断の材料を集めるために行う。どちらにも当たらない結果は伝えない。
 理由と経緯: docs/adr/0057-startup-report-only-actionable.md
 
