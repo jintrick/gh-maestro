@@ -56,15 +56,23 @@ description: gh-maestroセッションをこのワークスペースで起動す
 
    状態行が無ければ両方とも最新なので、鮮度については報告しない。遅れや確認不能を理由にセッション開始を止めず、自動で `git pull` や `node scripts/install.js` を実行しない。
 
-4. **直近のIssue/PR**: 新しくプロジェクトに加わったメンバーと同じ姿勢で、直近何が起きていたかを見出しレベルで把握してから作業を始める。本文は読まずタイトル一覧だけを見て（本文はコンテクストを消費する。深掘りが要るときはその対象だけを読むか explorer に委譲する）、その概況を人間へ伝える。
+4. **dev ブランチの作成事実**: セッションコンテキストに `[gh-maestro dev branch created]` があれば、setup が今回 `dev` を新しく作った。次の値を人間へ伝える。
+   - `DEV_BASE_BRANCH`（分岐元）と `DEV_BASE_COMMIT`
+   - `CURRENT_BRANCH`（人間が今いるブランチ）と `CURRENT_BRANCH_COMMITS_NOT_IN_DEV`（そのブランチにあって dev に無いコミット数）
+   - `DEV_PUSH`（`pushed` / `failed` / `skipped`）と `DEV_PUSH_COMMITS_NEW_ON_REMOTE_BASE`（push で GitHub 上の分岐元に無かったコミットが新たに出た数）
+   - `unknown REASON="..."` は確定できなかった値である。理由も伝える。`DEV_PUSH` が `failed` のときは、push できていないことを伝える。
+   - `CURRENT_BRANCH_COMMITS_NOT_IN_DEV` が 1 以上、または `unknown` のときは、人間の最新の作業が dev に入っていない可能性がある。最初のワーカーを起動する前に、このまま dev を基準に進めてよいか、人間が dev を更新してから進めるかを1問で確かめ、回答を得るまでワーカーを起動しない。orchestrator は dev を自分で書き換えない。
+   - 両方とも 0 のときは伝えるだけで待たない。`DEV_PUSH_COMMITS_NEW_ON_REMOTE_BASE` が 1 以上のときは、GitHub に出た件数を伝える。出たコミットは取り消せないため、これを理由に待たない。
+
+5. **直近のIssue/PR**: 新しくプロジェクトに加わったメンバーと同じ姿勢で、直近何が起きていたかを見出しレベルで把握してから作業を始める。本文は読まずタイトル一覧だけを見て（本文はコンテクストを消費する。深掘りが要るときはその対象だけを読むか explorer に委譲する）、その概況を人間へ伝える。
 
    ```sh
    gh issue list --repo $REPO --state open --limit 20
    gh pr list --repo $REPO --state merged --limit 15
    ```
 
-5. **テスト層宣言**: セッションコンテキストの `TEST_LAYERS_STATUS` が `missing` または `invalid` なら、`gh-maestro-test-setup` スキルを読んで従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更しない。承認後の設定・テスト配置・実行結果の確認まで終えてから次へ進む。`invalid` を理由に初期化やコンテキスト出力をやり直さず、出力された状態を使う。
+6. **テスト層宣言**: セッションコンテキストの `TEST_LAYERS_STATUS` が `missing` または `invalid` なら、`gh-maestro-test-setup` スキルを読んで従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更しない。承認後の設定・テスト配置・実行結果の確認まで終えてから次へ進む。`invalid` を理由に初期化やコンテキスト出力をやり直さず、出力された状態を使う。
 
-6. **壊れた config.json**: セッションコンテキストに `CONFIG_JSON_BROKEN=<path> (<理由>)` の行があれば、gh-maestro はそのファイルを使えず既定値で動いている。パスと理由を人間へ伝える。gh-maestro はこのファイルを書き換えないため、直すのは人間である。
+7. **壊れた config.json**: セッションコンテキストに `CONFIG_JSON_BROKEN=<path> (<理由>)` の行があれば、gh-maestro はそのファイルを使えず既定値で動いている。パスと理由を人間へ伝える。gh-maestro はこのファイルを書き換えないため、直すのは人間である。
 
-7. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
+8. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。

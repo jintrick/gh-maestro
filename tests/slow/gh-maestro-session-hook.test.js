@@ -518,3 +518,66 @@ test('CLI通し: 常駐プロセスのOS endpoint identity取得に失敗した�
     if (cleanupError) throw cleanupError;
   }
 });
+
+test('CLI通し: devが無く作業ブランチにコミットがあっても、事実行とsession contextを出し、.gitignoreを変えず作業ファイルを追跡しない', () => {
+  const workspace = createWorkspace();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-excl-bin-'));
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-excl-runtime-'));
+  try {
+    runGit(workspace, 'branch', '-D', 'dev');
+    runGit(workspace, 'push', '-q', 'origin', '--delete', 'dev');
+    runGit(workspace, 'checkout', '-qb', 'feature');
+    fs.writeFileSync(path.join(workspace, 'feature.txt'), 'f\n', 'utf8');
+    runGit(workspace, 'add', 'feature.txt');
+    runGit(workspace, 'commit', '-qm', 'feature commit');
+    const legacy = 'node_modules/\n.gh-maestro/\n';
+    fs.writeFileSync(path.join(workspace, '.gitignore'), legacy, 'utf8');
+    fs.mkdirSync(path.join(workspace, '.gh-maestro', 'worktrees', 'w1'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, '.gh-maestro', 'worktrees', 'w1', 'prompt.md'), 'x\n', 'utf8');
+
+    const fakeGh = createFakeGh(binDir);
+    const result = runHook(workspace, hookEnv(binDir, runtimeDir, fakeGh));
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^\[gh-maestro dev branch created\]$/m);
+    assert.match(result.stdout, /^CURRENT_BRANCH=feature$/m);
+    assert.match(result.stdout, /^CURRENT_BRANCH_COMMITS_NOT_IN_DEV=1$/m);
+    assert.match(result.stdout, /^DEV_PUSH=pushed$/m);
+    assert.match(result.stdout, /\[gh-maestro session context\]/);
+    assert.match(result.stdout, /^SESSION_ID=.+$/m);
+    assert.equal(fs.readFileSync(path.join(workspace, '.gitignore'), 'utf8'), legacy);
+    const status = runGit(workspace, 'status', '--porcelain', '--untracked-files=all').stdout.split('\n').filter(Boolean);
+    assert.ok(status.filter((line) => line.includes('.gh-maestro')).every((line) => line === '?? .gh-maestro/config.json'),
+      `prompt.md等が未追跡として現れないこと: ${status.join(' | ')}`);
+  } finally {
+    removeDirectory(workspace);
+    removeDirectory(binDir);
+    removeDirectory(runtimeDir);
+  }
+});
+
+test('CLI通し: info/excludeを書けないときは終了コード0で失敗段階を返し、dev を作らない', () => {
+  const workspace = createWorkspace();
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-excl-fail-bin-'));
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-session-hook-excl-fail-runtime-'));
+  try {
+    runGit(workspace, 'branch', '-D', 'dev');
+    runGit(workspace, 'push', '-q', 'origin', '--delete', 'dev');
+    const excludeFile = path.join(workspace, '.git', 'info', 'exclude');
+    fs.rmSync(excludeFile, { force: true });
+    fs.mkdirSync(excludeFile);
+
+    const fakeGh = createFakeGh(binDir);
+    const result = runHook(workspace, hookEnv(binDir, runtimeDir, fakeGh));
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^\[gh-maestro session hook failed\]/m);
+    assert.match(result.stdout, /^FAILED_STAGE=gh-maestro-setup\.js$/m);
+    assert.doesNotMatch(result.stdout, /\[gh-maestro session context\]/);
+    assert.equal(runGit(workspace, 'branch', '--list', 'dev').stdout.trim(), '');
+  } finally {
+    removeDirectory(workspace);
+    removeDirectory(binDir);
+    removeDirectory(runtimeDir);
+  }
+});

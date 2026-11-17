@@ -400,7 +400,7 @@ const CLEANERS = Object.freeze({
   'gh-maestro-setup.removeStaleDefaultHooks': (options) => require('../gh-maestro-setup')
     .cleanupLegacyStaleDefaultHooks(options),
   'gh-maestro-setup.ensureGitIgnore': (options) => require('../gh-maestro-setup')
-    .ensureGitIgnore({ ...options, cleanupOnly: true }),
+    .cleanupLegacyGitIgnore(options),
   'install.quarantineLegacyAgentsConfig': (options) => require('../install')
     .cleanupLegacyAgentsConfig(options),
   'install.quarantineLegacyHomePids': (options) => require('../install')

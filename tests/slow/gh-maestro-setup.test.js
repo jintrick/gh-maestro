@@ -11,7 +11,7 @@ const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'gh-maestro-setup.js');
 const setupModule = require(SCRIPT);
 
-// セットアップの副作用（git hooks 書き換え・.gitignore 追記・dev ブランチ作成・
+// セットアップの副作用（git hooks 書き換え・.git/info/exclude 追記・dev ブランチ作成・
 // GitHub API での旧CIファイル削除）はすべて main() の内側に閉じており、
 // require.main===module ガードで CLI 実行時のみ走る。
 // ここでは実プロセス起動（subprocess）で本来の振る舞いを検証しつつ、
@@ -691,5 +691,188 @@ test('require しただけでは副作用が起きない（git hooks を書き�
     assert.equal(r.status, 0, `require が失敗した: ${r.stderr}`);
     const out = JSON.parse(r.stdout.trim().split('\n').pop());
     assert.equal(out.preCommitExists, false, 'require だけで pre-commit フックが作られてはならない');
+  });
+});
+// ─── 作業ファイルの除外・dev作成の事実行（Issue #777） ───
+
+function withIsolatedProject(fn) {
+  return withGitProject((dir) => {
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-isolated-origin-'));
+    try {
+      const init = spawnSync('git', ['init', '--bare', '-q'], { cwd: bare, encoding: 'utf8' });
+      assert.equal(init.status, 0, init.stderr);
+      const head = spawnSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: bare, encoding: 'utf8' });
+      assert.equal(head.status, 0, head.stderr);
+      gitIn(dir, 'remote', 'set-url', 'origin', bare);
+      gitIn(dir, 'push', '-q', 'origin', 'main');
+      return fn(dir, bare);
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true });
+    }
+  });
+}
+
+function factBlock(stdout) {
+  const start = stdout.indexOf('[gh-maestro dev branch created]');
+  assert.ok(start >= 0, `dev作成の事実行が出力されること: ${stdout}`);
+  const fields = {};
+  for (const line of stdout.slice(start).split('\n').slice(1)) {
+    if (!/^[A-Z_]+=/.test(line)) break;
+    const eq = line.indexOf('=');
+    fields[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return fields;
+}
+
+function commitFile(dir, name, content, message) {
+  fs.writeFileSync(path.join(dir, name), content, 'utf8');
+  gitIn(dir, 'add', name);
+  gitIn(dir, 'commit', '-qm', message);
+}
+
+test('dev作成時は分岐元・今いるブランチの未取り込み件数・push で新たに出た件数を事実行として出す', () => {
+  withIsolatedProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    gitIn(dir, 'checkout', '-qb', 'feature');
+    commitFile(dir, 'feature-1.txt', '1\n', 'feature 1');
+    commitFile(dir, 'feature-2.txt', '2\n', 'feature 2');
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.deepEqual(factBlock(r.stdout), {
+      DEV_BASE_BRANCH: 'main',
+      DEV_BASE_COMMIT: gitIn(dir, 'rev-parse', 'main').stdout.trim(),
+      CURRENT_BRANCH: 'feature',
+      CURRENT_BRANCH_COMMITS_NOT_IN_DEV: '2',
+      DEV_PUSH: 'pushed',
+      DEV_PUSH_COMMITS_NEW_ON_REMOTE_BASE: '0',
+    });
+  });
+});
+
+test('分岐元に未pushのコミットがあると、dev のpushで GitHub に新たに出た件数として数える', () => {
+  withIsolatedProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    commitFile(dir, 'local-only.txt', 'x\n', 'local only on main');
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const block = factBlock(r.stdout);
+    assert.equal(block.CURRENT_BRANCH, 'main');
+    assert.equal(block.CURRENT_BRANCH_COMMITS_NOT_IN_DEV, '0');
+    assert.equal(block.DEV_PUSH, 'pushed');
+    assert.equal(block.DEV_PUSH_COMMITS_NEW_ON_REMOTE_BASE, '1');
+    assert.equal(
+      gitIn(dir, 'ls-remote', '--heads', 'origin', 'dev').stdout.split('\t')[0],
+      gitIn(dir, 'rev-parse', 'dev').stdout.trim(),
+      'origin/devがローカルのdevと一致すること',
+    );
+  });
+});
+
+test('GitHub上の分岐元が手元より先行していると、件数を数えず unknown と1行の理由を出す', () => {
+  withIsolatedProject((dir, bare) => {
+    prepareProjectWithoutDev(dir, 'main');
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-other-clone-'));
+    try {
+      gitIn(os.tmpdir(), 'clone', '-q', bare, other);
+      gitIn(other, 'config', 'user.email', 'test@example.com');
+      gitIn(other, 'config', 'user.name', 'test');
+      commitFile(other, 'remote-only.txt', 'r\n', 'remote only');
+      gitIn(other, 'push', '-q', 'origin', 'main');
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const value = factBlock(r.stdout).DEV_PUSH_COMMITS_NEW_ON_REMOTE_BASE;
+    assert.match(value, /^unknown REASON=".+"$/);
+    assert.ok(JSON.parse(value.slice('unknown REASON='.length)).length > 0);
+  });
+});
+
+test('detached HEADでは CURRENT_BRANCH を (detached HEAD) とし、dev に無いコミットを数える', () => {
+  withIsolatedProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    gitIn(dir, 'checkout', '-qb', 'feature');
+    commitFile(dir, 'feature.txt', 'f\n', 'feature');
+    gitIn(dir, 'checkout', '-q', '--detach');
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const block = factBlock(r.stdout);
+    assert.equal(block.CURRENT_BRANCH, '(detached HEAD)');
+    assert.equal(block.CURRENT_BRANCH_COMMITS_NOT_IN_DEV, '1');
+  });
+});
+
+test('devが既にあるときは dev 作成の事実行を出さない', () => {
+  withIsolatedProject((dir) => {
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /\[gh-maestro dev branch created\]/);
+  });
+});
+
+test('unknownFactは改行を含む理由でも1行に収まり、理由を復元できる', () => {
+  const reason = 'fatal: first line\nsecond line\r\nthird';
+  const fact = setupModule.unknownFact(reason);
+  assert.equal(fact.includes('\n'), false);
+  assert.equal(fact.includes('\r'), false);
+  assert.equal(JSON.parse(fact.slice('unknown REASON='.length)), reason);
+});
+
+test('作業ファイルは .git/info/exclude で除外し、.gitignoreは書き換えず、config.jsonだけを追跡対象に残す', () => {
+  withGitProject((dir) => {
+    const gitignore = path.join(dir, '.gitignore');
+    const legacy = 'node_modules/\n.gh-maestro/\n';
+    fs.writeFileSync(gitignore, legacy, 'utf8');
+    fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', 'w1'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'config.json'), '{}\n', 'utf8');
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), '{}\n', 'utf8');
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'worktrees', 'w1', 'prompt.md'), 'x\n', 'utf8');
+    const excludeFile = path.join(dir, '.git', 'info', 'exclude');
+
+    assert.equal(runSetupCli(dir).status, 0);
+    assert.equal(runSetupCli(dir).status, 0, '2回目も成功すること');
+
+    assert.equal(fs.readFileSync(gitignore, 'utf8'), legacy, '.gitignore は書き換えないこと');
+    const excludeLines = fs.readFileSync(excludeFile, 'utf8').split(/\r?\n/).map((line) => line.trim());
+    assert.equal(excludeLines.filter((line) => line === '.gh-maestro/*').length, 1, '2回実行しても重複しないこと');
+    assert.equal(excludeLines.filter((line) => line === '!.gh-maestro/config.json').length, 1);
+
+    const status = gitIn(dir, 'status', '--porcelain', '--untracked-files=all').stdout.split('\n').filter(Boolean);
+    assert.ok(status.filter((line) => line.includes('.gh-maestro')).every((line) => line === '?? .gh-maestro/config.json'),
+      '.gh-maestro配下はconfig.json以外が未追跡として現れないこと');
+
+    const wtParent = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-setup-wt-'));
+    const wt = path.join(wtParent, 'wt');
+    try {
+      gitIn(dir, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+      fs.mkdirSync(path.join(wt, '.gh-maestro'), { recursive: true });
+      fs.writeFileSync(path.join(wt, '.gh-maestro', 'prompt.md'), 'x\n', 'utf8');
+      fs.writeFileSync(path.join(wt, '.gh-maestro', 'config.json'), '{}\n', 'utf8');
+      const wtStatus = gitIn(wt, 'status', '--porcelain', '--untracked-files=all').stdout.split('\n').filter(Boolean);
+      assert.ok(wtStatus.filter((line) => line.includes('.gh-maestro')).every((line) => line === '?? .gh-maestro/config.json'),
+        'linked worktreeにも除外が効くこと');
+    } finally {
+      fs.rmSync(wtParent, { recursive: true, force: true });
+    }
+  });
+});
+
+test('setupで作業ファイル除外を書けないときは中断し、dev を作らず .gitignore も作らない', () => {
+  withIsolatedProject((dir) => {
+    prepareProjectWithoutDev(dir, 'main');
+    const excludeFile = path.join(dir, '.git', 'info', 'exclude');
+    fs.rmSync(excludeFile, { force: true });
+    fs.mkdirSync(excludeFile);
+
+    const r = runSetupCli(dir);
+    assert.notEqual(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /作業ファイルを git から除外できないため setup を中断しました/);
+    assert.equal(gitIn(dir, 'branch', '--list', 'dev').stdout.trim(), '', 'devを作らないこと');
+    assert.equal(fs.existsSync(path.join(dir, '.gitignore')), false, '.gitignoreを作らないこと');
   });
 });
