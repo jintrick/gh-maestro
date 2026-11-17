@@ -876,3 +876,27 @@ test('setupで作業ファイル除外を書けないときは中断し、dev �
     assert.equal(fs.existsSync(path.join(dir, '.gitignore')), false, '.gitignoreを作らないこと');
   });
 });
+
+test('リポジトリ直下に.gitignoreが無くてもsetupは成功し、.gitignoreを作らず、.git/info/excludeの2行で.gh-maestro配下のconfig.json以外を除外する', () => {
+  withGitProject((dir) => {
+    assert.equal(fs.existsSync(path.join(dir, '.gitignore')), false, '前提: .gitignoreが無いこと');
+    fs.mkdirSync(path.join(dir, '.gh-maestro', 'worktrees', 'w1'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'config.json'), '{}\n', 'utf8');
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'workers.json'), '{}\n', 'utf8');
+    fs.writeFileSync(path.join(dir, '.gh-maestro', 'worktrees', 'w1', 'prompt.md'), 'x\n', 'utf8');
+
+    const r = runSetupCli(dir);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+
+    assert.equal(fs.existsSync(path.join(dir, '.gitignore')), false, 'setupが.gitignoreを作らないこと');
+    const excludeLines = fs.readFileSync(path.join(dir, '.git', 'info', 'exclude'), 'utf8')
+      .split(/\r?\n/).map((line) => line.trim());
+    assert.ok(excludeLines.includes('.gh-maestro/*'), 'info/excludeに.gh-maestro/*があること');
+    assert.ok(excludeLines.includes('!.gh-maestro/config.json'), 'info/excludeに!.gh-maestro/config.jsonがあること');
+
+    const status = gitIn(dir, 'status', '--porcelain', '--untracked-files=all').stdout.split('\n').filter(Boolean);
+    const ghMaestroLines = status.filter((line) => line.includes('.gh-maestro'));
+    assert.deepEqual(ghMaestroLines, ['?? .gh-maestro/config.json'],
+      '.gh-maestro配下で未追跡として見えるのはconfig.jsonだけであること');
+  });
+});
