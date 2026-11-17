@@ -5,7 +5,7 @@
 
 const { spawnSync, REAL_SPAWN_DISABLED_ERROR_CODE } = require('./shared/child-process');
 const { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, chmodSync, lstatSync } = require('fs');
-const { resolve, relative, isAbsolute, sep } = require('path');
+const { resolve, relative, isAbsolute, sep, dirname } = require('path');
 const { parseFlags } = require('./shared/workspace');
 
 const USAGE = `gh-maestro-setup.js — プロジェクトごとの前提条件チェックと初期セットアップ
@@ -16,7 +16,7 @@ Arguments:
   [WORKSPACE_ROOT]  対象プロジェクトのルート（デフォルト CWD）
 
 WezTerm稼働（assistant用）/ git リポジトリ / gh 認証を検証し、.gh-maestro ディレクトリと
-.gitignore・dev ブランチ・コミット時の規約同期フックを用意する。フックは git が実際に
+.git/info/exclude（作業ファイルの除外）・dev ブランチ・コミット時の規約同期フックを用意する。dev を新しく作ったときは [gh-maestro dev branch created] の事実行を出す。フックは git が実際に
 使う置き場（core.hooksPath 解決先、未設定なら既定の git ディレクトリ配下）に導入する。
 その置き場がプロジェクトの管理対象（共有される）なら書き込まず、必要な呼び出しが既に
 存在するかを検証して正直に報告する。初回実行後は sentinel (.gh-maestro/setup-ok) で
@@ -315,31 +315,79 @@ function prepareDirectories() {
   ok('.gh-maestro/worktrees directory ready');
 }
 
-// ─── 3. .gitignore 確認・追記 ─────────────────────────────────────────────────
+// ─── 3. 作業ファイルの除外（.git/info/exclude） ──────────────────────────────
 
 // `.gh-maestro/` は一時的な実行状態（worktree・workers.json・ログ等）とプロジェクトの
 // 恒久的な設定（config.json）が同居する。丸ごと無視すると、config.json がworktreeへ
 // 複製されず、そこでのテスト層解決がホームディレクトリの共有設定へ意図せずフォール
 // バックする（Issue #528）。config.json だけは追跡対象として残す。
+//
+// 除外は .git/info/exclude に書く。このファイルは git の共通ディレクトリにあり、
+// linked worktree（ワーカーの作業場所）を含むすべての作業場所に効く。コミットされないため、
+// 人間が今どのブランチを開いているか、dev に何が入っているかに左右されない。
+// リポジトリ直下の .gitignore は読まず、書かない（以前の setup が書いた記述も触らない）。
 const IGNORE_ENTRY = '.gh-maestro/*';
 const IGNORE_EXCEPTION = '!.gh-maestro/config.json';
 const LEGACY_ENTRY = '.gh-maestro/';
+const EXCLUDE_MARKER = '# gh-maestro（作業ファイルを除外。config.json は追跡する）';
 
-function ensureGitIgnore(options = {}) {
+/**
+ * .git/info/exclude に IGNORE_ENTRY / IGNORE_EXCEPTION を冪等に書く。
+ * 書けない・確認できない場合は例外を投げる（フェイルクローズ）。除外できないまま
+ * 作業ファイルが追跡されうるため、呼び出し元は dev の作成より前にこれを完了させる。
+ *
+ * @param {{workspace?: string, spawnSyncFn?: Function}} [options]
+ * @returns {{status: 'unchanged'|'appended', path: string, added?: string[]}}
+ */
+function ensureGitExclude(options = {}) {
+  const workspace = options.workspace || workspaceRoot;
+  const spawnSyncFn = options.spawnSyncFn || spawnSync;
+  const pathResult = gitOutput(['rev-parse', '--git-path', 'info/exclude'], spawnSyncFn, workspace);
+  if (pathResult.status !== 'ok' || pathResult.value === '') {
+    throw new Error(`info/exclude の場所を git から取得できません: ${pathResult.detail || '出力が空です'}`);
+  }
+  const excludePath = resolve(workspace, pathResult.value);
+
+  let stat = null;
+  try {
+    stat = lstatSync(excludePath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new Error(`${excludePath} を確認できません: ${error.message}`);
+  }
+  if (stat && (stat.isSymbolicLink() || !stat.isFile())) {
+    throw new Error(`${excludePath} が通常ファイルではありません`);
+  }
+
+  const current = stat ? readFileSync(excludePath, 'utf8') : '';
+  const lines = current.split(/\r?\n/).map((line) => line.trim());
+  const missing = [IGNORE_ENTRY, IGNORE_EXCEPTION].filter((entry) => !lines.includes(entry));
+  if (missing.length === 0) {
+    ok(`${excludePath}: ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION} already present`);
+    return { status: 'unchanged', path: excludePath };
+  }
+  mkdirSync(dirname(excludePath), { recursive: true });
+  const separator = current === '' || current.endsWith('\n') ? '' : '\n';
+  appendFileSync(excludePath, `${separator}${EXCLUDE_MARKER}\n${missing.join('\n')}\n`, 'utf8');
+  ok(`${excludePath}: added ${missing.join(' / ')}`);
+  return { status: 'appended', path: excludePath, added: missing };
+}
+
+/**
+ * 旧形式（リポジトリ直下 .gitignore の `.gh-maestro/` 丸ごと無視）の整理。
+ * setup本体からは呼ばない。人間が cleanup-legacy.js で明示的に実行したときだけ使う。
+ * 旧形式が無い、または新形式が既に揃っている場合は何も書かない（absent）。
+ *
+ * @param {{workspace?: string}} [options]
+ * @returns {{status: 'absent'|'removed'|'unknown', path: string, reason?: string}}
+ */
+function cleanupLegacyGitIgnore(options = {}) {
   const workspace = options.workspace || workspaceRoot;
   const existsFn = options.existsFn || existsSync;
   const readFileFn = options.readFileFn || readFileSync;
-  const appendFileFn = options.appendFileFn || appendFileSync;
   const writeFileFn = options.writeFileFn || writeFileSync;
   const lstatFn = options.lstatFn || lstatSync;
-  const cleanupOnly = options.cleanupOnly === true;
   const gitignore = resolve(workspace, '.gitignore');
-  if (!existsFn(gitignore)) {
-    if (cleanupOnly) return { status: 'absent', path: gitignore };
-    appendFileFn(gitignore, `${IGNORE_ENTRY}\n${IGNORE_EXCEPTION}\n`, 'utf8');
-    ok(`.gitignore created with ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`);
-    return { status: 'removed', path: gitignore };
-  }
+  if (!existsFn(gitignore)) return { status: 'absent', path: gitignore };
   try {
     const stat = lstatFn(gitignore);
     if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -350,33 +398,103 @@ function ensureGitIgnore(options = {}) {
     return { status: 'unknown', path: gitignore, reason: `.gitignoreの確認に失敗しました: ${error.message}` };
   }
   const lines = String(readFileFn(gitignore, 'utf8')).split('\n');
-  const hasEntry = lines.some(l => l.trim() === IGNORE_ENTRY);
-  const hasException = lines.some(l => l.trim() === IGNORE_EXCEPTION);
-  if (hasEntry && hasException) {
-    if (cleanupOnly) return { status: 'absent', path: gitignore };
-    ok(`.gitignore already contains ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`);
-    return { status: 'absent', path: gitignore };
-  }
-  // 旧形式（`.gh-maestro/` 丸ごと無視）が残っていれば、新形式へ置き換える。
-  const withoutLegacy = lines.filter(l => l.trim() !== LEGACY_ENTRY);
-  const migrated = withoutLegacy.length !== lines.length;
-  if (cleanupOnly && !migrated) return { status: 'absent', path: gitignore };
+  const hasEntry = lines.some((line) => line.trim() === IGNORE_ENTRY);
+  const hasException = lines.some((line) => line.trim() === IGNORE_EXCEPTION);
+  if (hasEntry && hasException) return { status: 'absent', path: gitignore };
+  const withoutLegacy = lines.filter((line) => line.trim() !== LEGACY_ENTRY);
+  if (withoutLegacy.length === lines.length) return { status: 'absent', path: gitignore };
   const toAppend = [
     ...(hasEntry ? [] : [IGNORE_ENTRY]),
     ...(hasException ? [] : [IGNORE_EXCEPTION]),
   ];
   const nextContent = `${withoutLegacy.join('\n').replace(/\n*$/, '')}\n\n${toAppend.join('\n')}\n`;
   writeFileFn(gitignore, nextContent, 'utf8');
-  ok(migrated
-    ? `.gitignore updated: replaced legacy ${LEGACY_ENTRY} with ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`
-    : `.gitignore updated: added ${toAppend.join(' / ')}`);
-  return { status: migrated ? 'removed' : 'absent', path: gitignore };
+  ok(`.gitignore updated: replaced legacy ${LEGACY_ENTRY} with ${IGNORE_ENTRY} / ${IGNORE_EXCEPTION}`);
+  return { status: 'removed', path: gitignore };
 }
 
 // ─── 4. dev ブランチ確認・作成 ────────────────────────────────────────────────
 
+/**
+ * 値を確定できなかったことを表す。理由は JSON 文字列にして1行に収める
+ * （改行を含む git の stderr でも、起動フックが届ける行構造を壊さない）。
+ *
+ * @param {unknown} reason
+ * @returns {string}
+ */
+function unknownFact(reason) {
+  return `unknown REASON=${JSON.stringify(String(reason || 'unknown'))}`;
+}
+
+// 件数を数える。数えられなければ unknown にし、setup 自体は止めない（報告であって安全ガードではない）。
+function commitCountFact(range) {
+  const result = gitOutput(['rev-list', '--count', range]);
+  if (result.status !== 'ok') return unknownFact(result.detail);
+  if (!/^\d+$/.test(result.value)) return unknownFact(`rev-list の出力が数値ではありません: ${result.value}`);
+  return result.value;
+}
+
+// GitHub 上の分岐元ブランチの位置を ls-remote で得る。その commit が手元に無ければ
+// 差分を数えられないため unknown にする。fetch はしない（作業リポジトリの参照を動かさない）。
+function remoteBaseCommit(baseBranch) {
+  const result = gitOutput(['ls-remote', '--heads', 'origin', baseBranch]);
+  if (result.status !== 'ok') return { kind: 'unknown', reason: result.detail };
+  const wanted = `refs/heads/${baseBranch}`;
+  const match = result.value
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .find((parts) => parts[1] === wanted);
+  if (!match) return { kind: 'absent' };
+  const sha = match[0];
+  const type = gitOutput(['cat-file', '-t', sha]);
+  if (type.status !== 'ok' || type.value !== 'commit') {
+    return { kind: 'unknown', reason: `GitHub上の分岐元のコミット ${sha} が手元にありません` };
+  }
+  return { kind: 'present', sha };
+}
+
+// dev を作った直後・push の直前に集める事実。push の後では GitHub 側の状態が変わるため、分岐元の位置はここで取る。
+function collectDevFacts(baseBranch) {
+  const baseCommit = gitOutput(['rev-parse', '--verify', `refs/heads/${baseBranch}^{commit}`]);
+  const current = gitOutput(['branch', '--show-current']);
+  let currentBranch;
+  if (current.status !== 'ok') currentBranch = unknownFact(current.detail);
+  else currentBranch = current.value || '(detached HEAD)';
+  return {
+    baseBranch,
+    baseCommit: baseCommit.status === 'ok' ? baseCommit.value : unknownFact(baseCommit.detail),
+    currentBranch,
+    currentNotInDev: commitCountFact('refs/heads/dev..HEAD'),
+    remoteBase: remoteBaseCommit(baseBranch),
+  };
+}
+
+// push で GitHub に新たに出たコミットの件数。push していなければ 0。
+function publishedCommitsFact(facts, pushed) {
+  if (!pushed) return '0';
+  if (facts.remoteBase.kind === 'absent') {
+    const count = commitCountFact('refs/heads/dev');
+    return /^\d+$/.test(count) ? `${count} REMOTE_BASE=absent` : count;
+  }
+  if (facts.remoteBase.kind === 'unknown') return unknownFact(facts.remoteBase.reason);
+  return commitCountFact(`${facts.remoteBase.sha}..refs/heads/dev`);
+}
+
+function reportDevBranchCreated(facts, devPush, pushed) {
+  console.log([
+    '[gh-maestro dev branch created]',
+    `DEV_BASE_BRANCH=${facts.baseBranch}`,
+    `DEV_BASE_COMMIT=${facts.baseCommit}`,
+    `CURRENT_BRANCH=${facts.currentBranch}`,
+    `CURRENT_BRANCH_COMMITS_NOT_IN_DEV=${facts.currentNotInDev}`,
+    `DEV_PUSH=${devPush}`,
+    `DEV_PUSH_COMMITS_NEW_ON_REMOTE_BASE=${publishedCommitsFact(facts, pushed)}`,
+  ].join('\n'));
+}
+
 function ensureDevBranch() {
   const devBranch = run('git', ['branch', '--list', 'dev'], { capture: true });
+  let baseBranch = null;
   if (!devBranch) {
     const hasMain = Boolean(run('git', ['branch', '--list', 'main'], { capture: true }));
     const hasMaster = Boolean(run('git', ['branch', '--list', 'master'], { capture: true }));
@@ -394,7 +512,7 @@ function ensureDevBranch() {
         '→ 手動で作成する場合: git branch dev <分岐元ブランチ名> && git push -u origin dev',
       );
     }
-    const baseBranch = hasMain ? 'main' : 'master';
+    baseBranch = hasMain ? 'main' : 'master';
     step(`Creating 'dev' branch from ${baseBranch}...`);
     if (!run('git', ['branch', '--', 'dev', baseBranch])) {
       fail(
@@ -405,18 +523,27 @@ function ensureDevBranch() {
     }
   }
 
+  // 新しく作った直後、push の前に事実を集める。作成していなければ報告は出さない。
+  const facts = baseBranch ? collectDevFacts(baseBranch) : null;
+
   // ローカルに dev ブランチがあっても origin/dev が無いことがある
   // （初回セットアップ時の push 失敗・オフライン実行等）。毎回リモートの
   // 存在を確認し、無ければ再度 push を試みる。
+  let devPush = 'skipped';
+  let pushed = false;
   const remoteDev = run('git', ['ls-remote', '--heads', 'origin', 'dev'], { capture: true });
   if (!remoteDev) {
-    if (!run('git', ['push', '-u', 'origin', 'dev'])) {
+    pushed = Boolean(run('git', ['push', '-u', 'origin', 'dev']));
+    if (!pushed) {
       console.warn("  [warn] 'dev' ブランチのリモートへのpushに失敗しました。手動で実行してください: git push -u origin dev");
     }
+    devPush = pushed ? 'pushed' : 'failed';
   }
 
+  if (facts) reportDevBranchCreated(facts, devPush, pushed);
   ok("Branch 'dev' exists");
 }
+
 
 // ─── 5. git フック設置 ────────────────────────────────────────────────────────
 //
@@ -827,7 +954,7 @@ function reportHookResult(label, result) {
 /**
  * セットアップ本体。
  *
- * このスクリプトの副作用（git hooks の書き換え・.gitignore 追記・dev ブランチ作成・
+ * このスクリプトの副作用（git hooks の書き換え・.git/info/exclude 追記・dev ブランチ作成・
  * GitHub API での旧CIファイル削除）は、すべてこの関数の内側に閉じている。
  * かつては全てがトップレベルにあり、`require('./gh-maestro-setup')` するだけで
  * これらが実行された——実際に動作確認のつもりで require され、git hooks が
@@ -869,7 +996,17 @@ function main(argv = process.argv.slice(2)) {
   }
 
   prepareDirectories();
-  ensureGitIgnore();
+  // dev より先に除外を完了させる。除外できないまま dev を作って push すると、
+  // 作業ファイルが追跡されうる状態が GitHub へ出るため、ここで中断する。
+  try {
+    ensureGitExclude();
+  } catch (error) {
+    fail(
+      '作業ファイルを git から除外できないため setup を中断しました: ' + error.message,
+      '→ .git/info/exclude を書き込める状態にしてから /gh-maestro を再実行してください。',
+      "→ 'dev' ブランチは作成していません。",
+    );
+  }
   ensureDevBranch();
   // 実効フック置き場を一度だけ解決し、設置・撤去・後始末の各処理が同じ場所を扱う。
   // 管理対象（書き込まない契約）の置き場では retireChecksHooks も実行しない——
@@ -906,7 +1043,9 @@ module.exports = {
   gitStatus,
   getRemoteRepo,
   retireAiReviewCi,
-  ensureGitIgnore,
+  ensureGitExclude,
+  cleanupLegacyGitIgnore,
+  unknownFact,
   resolveHooksDir,
   hooksDirNeedsVerification,
   ensureSyncHook,
