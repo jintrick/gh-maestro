@@ -81,27 +81,89 @@ function formatStageFailure(stage, result, error) {
   return `gh-maestro-session-hook: ${stage.name} failed (exit ${exitCodeFromResult(result)})${suffix}\n`;
 }
 
+const MAX_FAILURE_REASON_LINES = 20;
+const MAX_FAILURE_REASON_CHARS = 1500;
+const FAILURE_REASON_TRUNCATED_NOTE = '  ... (truncated; full stderr was sent to stderr/debug log)';
+const RESERVED_CONTEXT_KEY_RE = /(^|\s)(SESSION_ID|REPO|WORKSPACE|BASE_BRANCH|GH_MAESTRO_WORKER|TEST_LAYERS_STATUS|CONFIG_JSON_BROKEN|BASE_BRANCH_STATUS|GH_MAESTRO_INSTALL_STATUS|FAILED_STAGE)=.*/g;
+const RESERVED_BLOCK_HEADER_RE = /\[gh-maestro\s+session[^\]]*\]/gi;
+const ANSI_NON_SGR_RE = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-9;?]*[ -/]*[@-~])/g;
+const CONTROL_CHARS_EXCEPT_LF_RE = /[\x00-\x09\x0b-\x1f\x7f-\x9f]/g;
+
+function sanitizeSingleLineText(value) {
+  return stripAnsi(outputText(value))
+    .replace(ANSI_NON_SGR_RE, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(CONTROL_CHARS_EXCEPT_LF_RE, '')
+    .trim();
+}
+
+function sanitizeFailureReasonLines(rawStderr) {
+  const normalized = stripAnsi(outputText(rawStderr))
+    .replace(ANSI_NON_SGR_RE, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(CONTROL_CHARS_EXCEPT_LF_RE, '');
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== '')
+    .map((line) => line
+      .replace(RESERVED_BLOCK_HEADER_RE, '(redacted session marker)')
+      .replace(RESERVED_CONTEXT_KEY_RE, '$1[redacted:$2]'));
+
+  return lines;
+}
+
 /**
  * 段階失敗時に orchestrator のコンテキストへ渡す失敗報告を整形する。
  *
  * UserPromptExpansion hook の stdout は終了コード 0 のときだけコンテキストへ加わる。
- * 失敗段階名と ANSI 除去済みの理由だけを出力し、SESSION_ID を含むセッション情報は含めない。
+ * 失敗段階名と、制御文字・予約コンテキストキー/見出しを無害化して字下げ・上限適用した
+ * 理由だけを出力し、SESSION_ID を含むセッション情報は含めない。
  *
  * @param {object|null|undefined} result
  * @returns {string}
  */
 function formatFailureContext(result) {
-  const failedStage = result && result.failedStage ? String(result.failedStage) : 'unknown';
-  const rawStderr = stripAnsi(outputText(result && result.stderr)).trim();
+  const failedStage = sanitizeSingleLineText(result && result.failedStage) || 'unknown';
   const exitCode = result && Number.isInteger(result.exitCode) && result.exitCode > 0
     ? result.exitCode
     : 1;
-  const reason = rawStderr || `${failedStage} failed (exit ${exitCode})`;
+  const sanitizedLines = sanitizeFailureReasonLines(result && result.stderr);
+  const sourceLines = sanitizedLines.length > 0
+    ? sanitizedLines
+    : [`${failedStage} failed (exit ${exitCode})`];
+
+  const boundedLines = [];
+  let remainingChars = MAX_FAILURE_REASON_CHARS;
+  let truncated = sourceLines.length > MAX_FAILURE_REASON_LINES;
+
+  for (const line of sourceLines.slice(0, MAX_FAILURE_REASON_LINES)) {
+    const separatorCost = boundedLines.length > 0 ? 1 : 0;
+    if (remainingChars <= separatorCost) {
+      truncated = true;
+      break;
+    }
+    const budget = remainingChars - separatorCost;
+    if (line.length <= budget) {
+      boundedLines.push(`  ${line}`);
+      remainingChars -= separatorCost + line.length;
+    } else {
+      boundedLines.push(`  ${line.slice(0, budget)}`);
+      truncated = true;
+      break;
+    }
+  }
+
+  if (truncated) {
+    boundedLines.push(FAILURE_REASON_TRUNCATED_NOTE);
+  }
+
   return [
     '[gh-maestro session hook failed]',
     `FAILED_STAGE=${failedStage}`,
     'REASON:',
-    reason,
+    ...boundedLines,
     '',
   ].join('\n');
 }
@@ -263,6 +325,9 @@ function main(argv = process.argv.slice(2), options = {}) {
 module.exports = {
   USAGE,
   SPEC,
+  MAX_FAILURE_REASON_LINES,
+  MAX_FAILURE_REASON_CHARS,
+  FAILURE_REASON_TRUNCATED_NOTE,
   stageDefinitions,
   formatFailureContext,
   runSessionHook,
