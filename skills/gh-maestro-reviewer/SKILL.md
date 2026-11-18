@@ -48,7 +48,7 @@ Node.jsの決定論的ツール（`run-review-jobs.js` / `finalize-review.js`）
 - GitHubへ投稿しない（採否判断、APPROVE/REQUEST_CHANGES判定もしない。ただし `finalize-review.js --mode incomplete` による投稿は除く）
 - **ジョブを実行しない。** ジョブ実行はフェーズ1とフェーズ2の間を決定論的スーパーバイザが行う。あなたが `run-review-jobs.js` を呼び、その完了を待ち続けてはならない（Codex wait ポーリングの再発）
 - OUTPUTファイルへ直接書き込まない。JSON生成のインラインスクリプトを書かない
-- **スコープ限定なしの全件テスト（`npm test` 等）および全体ビルド（`npm run build` 等）を実行しない。** diffで変更された特定のテストファイルのみを対象にしたピンポイント実行（例: `node --test tests/<file>.test.js`）は許容する
+- **テストと全体ビルドを実行しない。** 全件実行（`npm test` 等）も、diffで変更されたテストファイルに絞った実行も含む。テストが通るかはコーダーの申告と slow 層の結果で確かめるため、レビューでは流し直さない
 理由と経緯: docs/adr/0066-reviewer-runs-no-tests.md
 - ファイル名・拡張子・glob等の機械的規則だけで葉の関連性を判断しない。必ず実際のdiffを読んで判断する
 - 4幹そのものを丸ごと除外しない（葉単位の除外のみ）
