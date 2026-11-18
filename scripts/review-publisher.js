@@ -204,10 +204,23 @@ function formatFinalReviewBody({ posted, unresolved, rejected }) {
 }
 
 function assertZeroExit(commandDesc, result) {
-  if (!result || result.status !== 0) {
-    const detail = ghErrorDetail(result, { includeStdout: true, fallback: '' });
-    throw new Error(`${commandDesc} failed: ${detail}`);
+  if (!result) {
+    throw new Error(`${commandDesc} failed: no spawn result`);
   }
+  if (result.status === 0 && !result.error && !result.signal) {
+    return;
+  }
+  const parts = [`status=${result.status ?? 'null'}`];
+  if (result.signal) parts.push(`signal=${result.signal}`);
+  if (result.error && result.error.message) parts.push(`error=${result.error.message}`);
+  const stderr = typeof result.stderr === 'string' ? result.stderr.trim() : '';
+  if (stderr) {
+    parts.push(`stderr=${stderr}`);
+  } else if (!result.error && !result.signal) {
+    const stdoutDetail = ghErrorDetail(result, { includeStdout: true, fallback: '' });
+    if (stdoutDetail) parts.push(`stdout=${stdoutDetail}`);
+  }
+  throw new Error(`${commandDesc} failed: ${parts.join(', ')}`);
 }
 
 function runRequired(command, args, opts = {}, spawnFn = spawnSync) {
@@ -216,8 +229,8 @@ function runRequired(command, args, opts = {}, spawnFn = spawnSync) {
   return result.stdout;
 }
 
-function loadFileAtCommit(headRefOid, filePath, cwd) {
-  return runRequired('git', ['show', `${headRefOid}:${filePath}`], { cwd });
+function loadFileAtCommit(headRefOid, filePath, cwd, spawnFn = spawnSync) {
+  return runRequired('git', ['show', `${headRefOid}:${filePath}`], { cwd }, spawnFn);
 }
 
 /**
@@ -278,7 +291,8 @@ function processFindings(payload, options = {}) {
     else candidates.push({ finding, finding_number: index + 1 });
   }
 
-  const diffText = options.diffText ?? runRequired('gh', ['pr', 'diff', String(payload.pr), '--repo', payload.repo]);
+  const spawnFn = options.spawnFn || spawnSync;
+  const diffText = options.diffText ?? runRequired('gh', ['pr', 'diff', String(payload.pr), '--repo', payload.repo], {}, spawnFn);
   const rightLinesByPath = parseRightLinesByPath(diffText);
   const cwd = options.cwd || process.cwd();
   const resolved = [];
@@ -288,7 +302,7 @@ function processFindings(payload, options = {}) {
   for (const { finding, finding_number } of candidates) {
     try {
       if (!fileCache.has(finding.path)) {
-        fileCache.set(finding.path, options.files?.[finding.path] ?? loadFileAtCommit(payload.headRefOid, finding.path, cwd));
+        fileCache.set(finding.path, options.files?.[finding.path] ?? loadFileAtCommit(payload.headRefOid, finding.path, cwd, spawnFn));
       }
       const lineResult = resolveLineAnchor(fileCache.get(finding.path), finding);
       if (lineResult.status !== 'resolved') {
@@ -384,6 +398,7 @@ module.exports = {
   postInlineComment,
   postFileComment,
   postFinalReview,
+  assertZeroExit,
   parseArgs,
   USAGE,
 };

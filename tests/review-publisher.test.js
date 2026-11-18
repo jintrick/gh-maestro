@@ -17,6 +17,7 @@ const {
   postInlineComment,
   postFileComment,
   postFinalReview,
+  assertZeroExit,
 } = require('../scripts/review-publisher');
 
 function finding(overrides = {}) {
@@ -371,4 +372,125 @@ test('postInlineComment / postFileComment / postFinalReview: 32KB超の日本語
     () => postFinalReview(payload, 'x', () => ({ status: null, stdout: '', stderr: '', error: new Error('spawnSync gh EPIPE') })),
     /spawnSync gh EPIPE/
   );
+});
+
+test('processFindings / postFinalReview: 起動エラー（signal なし・途中までの stdout を伴うもの）でエラー内容・終了ステータスを残し途中 stdout で隠さない', () => {
+  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [] };
+  let diffError;
+  assert.throws(
+    () => processFindings(payload, {
+      spawnFn: () => ({
+        status: null,
+        signal: null,
+        stdout: 'diff --git a/partial.js b/partial.js\n+partial diff',
+        stderr: '',
+        error: new Error('spawnSync gh ENOBUFS'),
+      }),
+    }),
+    (err) => {
+      diffError = err;
+      return true;
+    }
+  );
+  assert.match(diffError.message, /status=null/);
+  assert.doesNotMatch(diffError.message, /signal=/);
+  assert.match(diffError.message, /error=spawnSync gh ENOBUFS/);
+  assert.doesNotMatch(diffError.message, /diff --git a\/partial\.js/);
+
+  let apiError;
+  assert.throws(
+    () => postFinalReview(payload, 'body', () => ({
+      status: null,
+      signal: null,
+      stdout: 'partial api stdout',
+      stderr: 'partial stderr',
+      error: new Error('spawnSync gh ETIMEDOUT'),
+    })),
+    (err) => {
+      apiError = err;
+      return true;
+    }
+  );
+  assert.match(apiError.message, /status=null/);
+  assert.doesNotMatch(apiError.message, /signal=/);
+  assert.match(apiError.message, /error=spawnSync gh ETIMEDOUT/);
+  assert.match(apiError.message, /stderr=partial stderr/);
+  assert.doesNotMatch(apiError.message, /partial api stdout/);
+});
+
+test('processFindings / assertZeroExit: signal による終了（error なし・途中までの stdout あり）で signal と終了ステータスを残し途中 stdout を出さない', () => {
+  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [] };
+  let caught;
+  assert.throws(
+    () => processFindings(payload, {
+      spawnFn: () => ({
+        status: null,
+        signal: 'SIGKILL',
+        stdout: 'diff --git a/killed.js b/killed.js\n+partial',
+        stderr: '',
+      }),
+    }),
+    (err) => {
+      caught = err;
+      return true;
+    }
+  );
+  assert.match(caught.message, /status=null/);
+  assert.match(caught.message, /signal=SIGKILL/);
+  assert.doesNotMatch(caught.message, /diff --git a\/killed\.js/);
+
+  let zeroWithSignal;
+  assert.throws(
+    () => assertZeroExit('gh pr diff 42', {
+      status: 0,
+      signal: 'SIGTERM',
+      stdout: 'partial output',
+      stderr: '',
+    }),
+    (err) => {
+      zeroWithSignal = err;
+      return true;
+    }
+  );
+  assert.match(zeroWithSignal.message, /status=0/);
+  assert.match(zeroWithSignal.message, /signal=SIGTERM/);
+  assert.doesNotMatch(zeroWithSignal.message, /partial output/);
+});
+
+test('processFindings / postFinalReview: 非0終了で終了ステータスと stderr（stderr が空のときは stdout）を残す', () => {
+  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [] };
+  let stderrFailure;
+  assert.throws(
+    () => processFindings(payload, {
+      spawnFn: () => ({
+        status: 2,
+        signal: null,
+        stdout: 'diff --git a/ignored.js b/ignored.js',
+        stderr: 'gh: HTTP 500 Internal Server Error',
+      }),
+    }),
+    (err) => {
+      stderrFailure = err;
+      return true;
+    }
+  );
+  assert.match(stderrFailure.message, /status=2/);
+  assert.match(stderrFailure.message, /stderr=gh: HTTP 500 Internal Server Error/);
+  assert.doesNotMatch(stderrFailure.message, /diff --git a\/ignored\.js/);
+
+  let stdoutFallbackFailure;
+  assert.throws(
+    () => postFinalReview(payload, 'body', () => ({
+      status: 1,
+      signal: null,
+      stdout: '{"message":"Validation Failed"}',
+      stderr: '',
+    })),
+    (err) => {
+      stdoutFallbackFailure = err;
+      return true;
+    }
+  );
+  assert.match(stdoutFallbackFailure.message, /status=1/);
+  assert.match(stdoutFallbackFailure.message, /stdout=\{"message":"Validation Failed"\}/);
 });
