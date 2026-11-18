@@ -374,14 +374,14 @@ test('postInlineComment / postFileComment / postFinalReview: 32KB超の日本語
   );
 });
 
-test('processFindings / postFinalReview: 起動エラー（途中までの stdout を伴うもの）でエラー内容・signal・終了ステータスを残し途中 stdout で隠さない', () => {
+test('processFindings / postFinalReview: 起動エラー（signal なし・途中までの stdout を伴うもの）でエラー内容・終了ステータスを残し途中 stdout で隠さない', () => {
   const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [] };
   let diffError;
   assert.throws(
     () => processFindings(payload, {
       spawnFn: () => ({
         status: null,
-        signal: 'SIGTERM',
+        signal: null,
         stdout: 'diff --git a/partial.js b/partial.js\n+partial diff',
         stderr: '',
         error: new Error('spawnSync gh ENOBUFS'),
@@ -393,7 +393,7 @@ test('processFindings / postFinalReview: 起動エラー（途中までの stdou
     }
   );
   assert.match(diffError.message, /status=null/);
-  assert.match(diffError.message, /signal=SIGTERM/);
+  assert.doesNotMatch(diffError.message, /signal=/);
   assert.match(diffError.message, /error=spawnSync gh ENOBUFS/);
   assert.doesNotMatch(diffError.message, /diff --git a\/partial\.js/);
 
@@ -401,7 +401,7 @@ test('processFindings / postFinalReview: 起動エラー（途中までの stdou
   assert.throws(
     () => postFinalReview(payload, 'body', () => ({
       status: null,
-      signal: 'SIGTERM',
+      signal: null,
       stdout: 'partial api stdout',
       stderr: 'partial stderr',
       error: new Error('spawnSync gh ETIMEDOUT'),
@@ -412,7 +412,7 @@ test('processFindings / postFinalReview: 起動エラー（途中までの stdou
     }
   );
   assert.match(apiError.message, /status=null/);
-  assert.match(apiError.message, /signal=SIGTERM/);
+  assert.doesNotMatch(apiError.message, /signal=/);
   assert.match(apiError.message, /error=spawnSync gh ETIMEDOUT/);
   assert.match(apiError.message, /stderr=partial stderr/);
   assert.doesNotMatch(apiError.message, /partial api stdout/);

@@ -65,13 +65,13 @@ function nodeRequireFlag(filePath) {
   return `--require="${path.resolve(filePath).replace(/\\/g, '/')}"`;
 }
 
-test('slow: review-publisher 起動エラー（途中までの stdout を伴うもの）で worker.log にエラー内容・signal・status が残り途中 stdout で隠れない', () => {
+test('slow: review-publisher 起動エラー（signal なし・途中までの stdout を伴うもの）で worker.log にエラー内容・status が残り途中 stdout で隠れない', () => {
   withTempDir('ghm-slow-rm-log-startup-', (dir) => {
     const artifactPath = writeArtifact(dir, 42, 'o/r');
     const { logFile, log } = createWorkerLogger(dir, 42, 'issue-785-review-manager-pr-42');
     const preloadPath = writeGhSpawnPreload(dir, {
       status: null,
-      signal: 'SIGTERM',
+      signal: null,
       stdout: 'diff --git a/partial-startup.js b/partial-startup.js\n+partial',
       stderr: '',
       errorMessage: 'spawnSync gh ENOBUFS',
@@ -92,8 +92,8 @@ test('slow: review-publisher 起動エラー（途中までの stdout を伴う�
     assert.equal(publish.status, 1);
     const workerLog = fs.readFileSync(logFile, 'utf8');
     assert.match(workerLog, /spawnSync gh ENOBUFS/);
-    assert.match(workerLog, /signal=SIGTERM/);
     assert.match(workerLog, /status=null/);
+    assert.doesNotMatch(workerLog, /signal=/);
     assert.match(workerLog, /review-publisher exited with status 1/);
     assert.doesNotMatch(workerLog, /diff --git a\/partial-startup\.js/);
   });

@@ -228,7 +228,7 @@ test('createPrComment / ghErrorDetail: NODE_TEST_CONTEXT 既定ガードと allo
 test('ghErrorDetail: includeStdout=true でも error または signal がある場合は途中 stdout で原因を隠さない', () => {
   assert.equal(
     ghComments.ghErrorDetail(
-      { status: null, signal: 'SIGTERM', stdout: 'diff --git partial', stderr: '', error: new Error('spawnSync gh ENOBUFS') },
+      { status: null, signal: null, stdout: 'diff --git partial', stderr: '', error: new Error('spawnSync gh ENOBUFS') },
       { includeStdout: true, fallback: '' }
     ),
     'spawnSync gh ENOBUFS'
