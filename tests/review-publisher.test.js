@@ -7,8 +7,13 @@ const crypto = require('node:crypto');
 const {
   validateFinding,
   resolveLineAnchor,
+  parsePatchRightLines,
   parseRightLinesByPath,
   isLineInDiff,
+  buildPullFilesJqFilter,
+  partitionTargetPathsForJq,
+  decodePrFilesBase64Lines,
+  fetchPrFiles,
   formatFinalReviewBody,
   formatFindingBody,
   formatFileFinding,
@@ -80,7 +85,22 @@ test('resolveLineAnchor uses context to disambiguate repeated anchors', () => {
   );
 });
 
-test('parseRightLinesByPath records right-side hunk lines', () => {
+test('parsePatchRightLines and parseRightLinesByPath record right-side hunk lines including ++ lines', () => {
+  const patch = [
+    '@@ -8,2 +10,4 @@',
+    ' context',
+    '-old',
+    '+new',
+    '+++kept_plus_line',
+    ' next',
+  ].join('\n');
+  const patchLines = parsePatchRightLines(patch);
+  assert.equal(patchLines.has(10), true);
+  assert.equal(patchLines.has(11), true);
+  assert.equal(patchLines.has(12), true);
+  assert.equal(patchLines.has(13), true);
+  assert.equal(patchLines.has(9), false);
+
   const diff = [
     'diff --git a/src/foo.ts b/src/foo.ts',
     '--- a/src/foo.ts',
@@ -98,7 +118,7 @@ test('parseRightLinesByPath records right-side hunk lines', () => {
   assert.equal(isLineInDiff(lines, 'src/foo.ts', 9), false);
 });
 
-test('processFindings resolves, checks diff, and separates unresolved findings', () => {
+test('processFindings resolves, checks prFiles patch, and separates unresolved findings', () => {
   const payload = {
     pr: 1,
     repo: 'o/r',
@@ -108,17 +128,19 @@ test('processFindings resolves, checks diff, and separates unresolved findings',
       finding({ line_anchor: 'not in file', summary: 'Missing anchor' }),
     ],
   };
-  const diffText = [
-    'diff --git a/src/foo.ts b/src/foo.ts',
-    '--- a/src/foo.ts',
-    '+++ b/src/foo.ts',
-    '@@ -1,3 +1,3 @@',
-    ' async function main() {',
-    '   await saveUser(user)',
-    '   return user',
-  ].join('\n');
+  const prFiles = [
+    {
+      filename: 'src/foo.ts',
+      patch: [
+        '@@ -1,3 +1,3 @@',
+        ' async function main() {',
+        '   await saveUser(user)',
+        '   return user',
+      ].join('\n'),
+    },
+  ];
   const result = processFindings(payload, {
-    diffText,
+    prFiles,
     files: {
       'src/foo.ts': [
         'async function main() {',
@@ -134,7 +156,7 @@ test('processFindings resolves, checks diff, and separates unresolved findings',
   assert.equal(result.unresolved[0].status, 'unresolved_anchor');
 });
 
-test('processFindings rejects findings with missing severity', () => {
+test('processFindings rejects findings with missing severity without calling gh', () => {
   const f = finding();
   delete f.severity;
   const payload = {
@@ -143,9 +165,14 @@ test('processFindings rejects findings with missing severity', () => {
     headRefOid: 'abc',
     findings: [f],
   };
+  const spawnCalls = [];
   const result = processFindings(payload, {
-    diffText: '',
+    spawnFn: (cmd, args) => {
+      spawnCalls.push({ cmd, args });
+      return { status: 0, stdout: '', stderr: '' };
+    },
   });
+  assert.equal(spawnCalls.length, 0);
   assert.equal(result.posted.length, 0);
   assert.equal(result.rejected.length, 1);
   assert.ok(result.rejected[0].errors.some(e => e.includes('severity is required')));
@@ -225,13 +252,15 @@ test('publish identifies every finding by raw artifact bytes and posts all threa
   const result = publish(payload, {
     artifactBytes,
     resultMarker: '<!-- review result -->',
-    diffText: [
-      'diff --git a/src/foo.ts b/src/foo.ts',
-      '--- a/src/foo.ts',
-      '+++ b/src/foo.ts',
-      '@@ -1,1 +1,1 @@',
-      '+await saveUser(user)',
-    ].join('\n'),
+    prFiles: [
+      {
+        filename: 'src/foo.ts',
+        patch: [
+          '@@ -1,1 +1,1 @@',
+          '+await saveUser(user)',
+        ].join('\n'),
+      },
+    ],
     files: { 'src/foo.ts': 'await saveUser(user)\n' },
     postInlineReviewFn: (_payload, findingWithMarker) => events.push({ kind: 'line', marker: findingWithMarker.review_finding_marker }),
     postFileReviewFn: (_payload, item) => events.push({ kind: 'file', marker: item.finding.review_finding_marker }),
@@ -257,13 +286,15 @@ test('publish skips the final review when posting any finding thread fails', () 
     findings: [finding(), finding({ line_anchor: 'missing anchor', summary: 'file finding' })],
   }, {
     artifactBytes: Buffer.from('artifact'),
-    diffText: [
-      'diff --git a/src/foo.ts b/src/foo.ts',
-      '--- a/src/foo.ts',
-      '+++ b/src/foo.ts',
-      '@@ -1,1 +1,1 @@',
-      '+await saveUser(user)',
-    ].join('\n'),
+    prFiles: [
+      {
+        filename: 'src/foo.ts',
+        patch: [
+          '@@ -1,1 +1,1 @@',
+          '+await saveUser(user)',
+        ].join('\n'),
+      },
+    ],
     files: { 'src/foo.ts': 'await saveUser(user)\n' },
     postInlineReviewFn: () => events.push('inline'),
     postFileReviewFn: () => {
@@ -309,7 +340,6 @@ test('publishArtifactFile puts the exact marker of the artifact bytes on the fin
 
     const posted = [];
     publishArtifactFile(file, {
-      diffText: '',
       postInlineReviewFn: () => { throw new Error('no inline findings expected'); },
       postFinalReviewFn: (payload, body) => posted.push({ payload, body }),
     });
@@ -375,14 +405,14 @@ test('postInlineComment / postFileComment / postFinalReview: 32KB超の日本語
 });
 
 test('processFindings / postFinalReview: 起動エラー（signal なし・途中までの stdout を伴うもの）でエラー内容・終了ステータスを残し途中 stdout で隠さない', () => {
-  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [] };
+  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [finding()] };
   let diffError;
   assert.throws(
     () => processFindings(payload, {
       spawnFn: () => ({
         status: null,
         signal: null,
-        stdout: 'diff --git a/partial.js b/partial.js\n+partial diff',
+        stdout: '{"filename":"partial.js"}',
         stderr: '',
         error: new Error('spawnSync gh ENOBUFS'),
       }),
@@ -395,7 +425,7 @@ test('processFindings / postFinalReview: 起動エラー（signal なし・途�
   assert.match(diffError.message, /status=null/);
   assert.doesNotMatch(diffError.message, /signal=/);
   assert.match(diffError.message, /error=spawnSync gh ENOBUFS/);
-  assert.doesNotMatch(diffError.message, /diff --git a\/partial\.js/);
+  assert.doesNotMatch(diffError.message, /partial\.js/);
 
   let apiError;
   assert.throws(
@@ -419,14 +449,14 @@ test('processFindings / postFinalReview: 起動エラー（signal なし・途�
 });
 
 test('processFindings / assertZeroExit: signal による終了（error なし・途中までの stdout あり）で signal と終了ステータスを残し途中 stdout を出さない', () => {
-  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [] };
+  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [finding()] };
   let caught;
   assert.throws(
     () => processFindings(payload, {
       spawnFn: () => ({
         status: null,
         signal: 'SIGKILL',
-        stdout: 'diff --git a/killed.js b/killed.js\n+partial',
+        stdout: '{"filename":"killed.js"}',
         stderr: '',
       }),
     }),
@@ -437,11 +467,11 @@ test('processFindings / assertZeroExit: signal による終了（error なし・
   );
   assert.match(caught.message, /status=null/);
   assert.match(caught.message, /signal=SIGKILL/);
-  assert.doesNotMatch(caught.message, /diff --git a\/killed\.js/);
+  assert.doesNotMatch(caught.message, /killed\.js/);
 
   let zeroWithSignal;
   assert.throws(
-    () => assertZeroExit('gh pr diff 42', {
+    () => assertZeroExit('gh api repos/acme/repo/pulls/42/files', {
       status: 0,
       signal: 'SIGTERM',
       stdout: 'partial output',
@@ -458,14 +488,14 @@ test('processFindings / assertZeroExit: signal による終了（error なし・
 });
 
 test('processFindings / postFinalReview: 非0終了で終了ステータスと stderr（stderr が空のときは stdout）を残す', () => {
-  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [] };
+  const payload = { pr: 42, repo: 'acme/repo', headRefOid: 'deadbeef', findings: [finding()] };
   let stderrFailure;
   assert.throws(
     () => processFindings(payload, {
       spawnFn: () => ({
         status: 2,
         signal: null,
-        stdout: 'diff --git a/ignored.js b/ignored.js',
+        stdout: '{"filename":"ignored.js"}',
         stderr: 'gh: HTTP 500 Internal Server Error',
       }),
     }),
@@ -476,7 +506,7 @@ test('processFindings / postFinalReview: 非0終了で終了ステータスと s
   );
   assert.match(stderrFailure.message, /status=2/);
   assert.match(stderrFailure.message, /stderr=gh: HTTP 500 Internal Server Error/);
-  assert.doesNotMatch(stderrFailure.message, /diff --git a\/ignored\.js/);
+  assert.doesNotMatch(stderrFailure.message, /ignored\.js/);
 
   let stdoutFallbackFailure;
   assert.throws(
@@ -493,4 +523,148 @@ test('processFindings / postFinalReview: 非0終了で終了ステータスと s
   );
   assert.match(stdoutFallbackFailure.message, /status=1/);
   assert.match(stdoutFallbackFailure.message, /stdout=\{"message":"Validation Failed"\}/);
+});
+
+test('processFindings uses pulls/{n}/files with --jq @json|@base64 instead of gh pr diff and handles renamed files', () => {
+  const encode = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64');
+  const calls = [];
+  const payload = {
+    pr: 572,
+    repo: 'acme/repo',
+    headRefOid: 'abc123',
+    findings: [
+      finding({ path: 'src/renamed-new.ts', line_anchor: 'const added = 1;' }),
+      finding({ path: 'src/renamed-new.ts', line_anchor: 'const unchanged = 0;', summary: 'Outside hunk in renamed file' }),
+    ],
+  };
+
+  const result = processFindings(payload, {
+    files: {
+      'src/renamed-new.ts': [
+        'const unchanged = 0;',
+        'const added = 1;',
+      ].join('\n'),
+    },
+    spawnFn: (cmd, args) => {
+      calls.push({ cmd, args });
+      // 1行目は生base64、2行目はJSON文字列クォート付きbase64の双方を検証する（同一ファイルは重複排除されるため1件で足りるがクォート形式も確認）。
+      return {
+        status: 0,
+        stdout: `${JSON.stringify(encode({
+          filename: 'src/renamed-new.ts',
+          patch: '@@ -2,0 +2,1 @@\n+const added = 1;\n',
+        }))}\n`,
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'gh');
+  assert.deepEqual(calls[0].args.slice(0, 6), [
+    'api', '--method', 'GET', 'repos/acme/repo/pulls/572/files', '-f', 'per_page=100',
+  ]);
+  assert.ok(calls[0].args.includes('--paginate'));
+  const jqIndex = calls[0].args.indexOf('--jq');
+  assert.ok(jqIndex >= 0);
+  assert.match(calls[0].args[jqIndex + 1], /"src\/renamed-new\.ts"/);
+  assert.match(calls[0].args[jqIndex + 1], /@json \| @base64/);
+  assert.ok(!calls[0].args.includes('diff'));
+
+  assert.equal(result.posted.length, 1);
+  assert.equal(result.posted[0].resolved_line, 2);
+  assert.equal(result.unresolved.length, 1);
+  assert.equal(result.unresolved[0].status, 'diff_outside_anchor');
+  assert.equal(result.unresolved[0].resolved_line, 1);
+});
+
+test('publish posts omitted-patch findings at file level without blocking inline findings or the final review', () => {
+  const payload = {
+    pr: 572,
+    repo: 'acme/repo',
+    headRefOid: 'abc123',
+    findings: [
+      finding({ path: 'src/generated-huge.ts', line_anchor: 'const x = 1;', summary: 'Huge patch omitted' }),
+      finding({ path: 'src/small.ts', line_anchor: 'const y = 2;', summary: 'Small inline finding' }),
+    ],
+  };
+  const posted = [];
+  const encode = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64');
+
+  const result = publish(payload, {
+    files: {
+      'src/generated-huge.ts': 'const x = 1;\n',
+      'src/small.ts': 'const y = 2;\n',
+    },
+    spawnFn: () => ({
+      status: 0,
+      stdout: [
+        encode({ filename: 'src/generated-huge.ts', patch: null }),
+        encode({ filename: 'src/small.ts', patch: '@@ -1,0 +1,1 @@\n+const y = 2;\n' }),
+      ].join('\n'),
+      stderr: '',
+    }),
+    postInlineReviewFn: (_p, item) => posted.push({ kind: 'inline', path: item.path, line: item.resolved_line }),
+    postFileReviewFn: (_p, item) => posted.push({ kind: 'file', path: item.finding.path, status: item.status }),
+    postFinalReviewFn: (_p, body) => posted.push({ kind: 'final', body }),
+  });
+
+  assert.equal(result.posted.length, 1);
+  assert.equal(result.unresolved.length, 1);
+  assert.equal(result.unresolved[0].status, 'patch_unavailable');
+  assert.deepEqual(posted.slice(0, 2), [
+    { kind: 'inline', path: 'src/small.ts', line: 1 },
+    { kind: 'file', path: 'src/generated-huge.ts', status: 'patch_unavailable' },
+  ]);
+  assert.equal(posted[2].kind, 'final');
+  assert.match(posted[2].body, /^Review Manager completed\./);
+});
+
+test('fetchPrFiles splits target paths across multiple --jq batches instead of dropping path filtering', () => {
+  const encode = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64');
+  const paths = ['src/alpha-one.ts', 'src/beta-two.ts', 'src/gamma-three.ts'];
+  // 1件だけ入る上限を設定し、全件経路にフォールバックせず必ず分割バッチごとに --jq 絞り込みが行われることを検証する。
+  const singleLimit = buildPullFilesJqFilter(['src/alpha-one.ts']).length + 5;
+  assert.deepEqual(partitionTargetPathsForJq(paths, singleLimit), [
+    ['src/alpha-one.ts'],
+    ['src/beta-two.ts'],
+    ['src/gamma-three.ts'],
+  ]);
+
+  const calls = [];
+  const files = fetchPrFiles(
+    { pr: 572, repo: 'acme/repo' },
+    [...paths, 'src/alpha-one.ts'],
+    (cmd, args) => {
+      calls.push({ cmd, args });
+      const jq = args[args.indexOf('--jq') + 1];
+      if (jq.includes('alpha-one')) return { status: 0, stdout: `${encode({ filename: 'src/alpha-one.ts', patch: '@@ -1 +1 @@\n+a' })}\n`, stderr: '' };
+      if (jq.includes('beta-two')) return { status: 0, stdout: `${encode({ filename: 'src/beta-two.ts', patch: null })}\n`, stderr: '' };
+      return { status: 0, stdout: `${encode({ filename: 'src/gamma-three.ts', patch: '@@ -1 +1 @@\n+c' })}\n`, stderr: '' };
+    },
+    singleLimit
+  );
+
+  assert.equal(calls.length, 3);
+  for (const call of calls) {
+    const jq = call.args[call.args.indexOf('--jq') + 1];
+    assert.match(jq, /as \$targets \| \.\[\] \| select/);
+  }
+  assert.deepEqual(files.map(f => f.filename), paths);
+});
+
+test('decodePrFilesBase64Lines fails closed on each corrupt response kind', () => {
+  assert.throws(() => decodePrFilesBase64Lines('not-valid-base64!'), /not valid base64/);
+  assert.throws(
+    () => decodePrFilesBase64Lines(Buffer.from('{broken json', 'utf8').toString('base64')),
+    /not valid JSON/
+  );
+  assert.throws(
+    () => decodePrFilesBase64Lines(Buffer.from(JSON.stringify({ message: 'Not Found' }), 'utf8').toString('base64')),
+    /missing a valid filename/
+  );
+  assert.throws(
+    () => decodePrFilesBase64Lines(Buffer.from(JSON.stringify({ filename: 'src/a.ts', patch: 42 }), 'utf8').toString('base64')),
+    /invalid patch type/
+  );
 });

@@ -123,6 +123,32 @@ function resolveLineAnchor(fileText, finding) {
   return { status: 'ambiguous_anchor', matchCount: matches.length };
 }
 
+const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+const MAX_PULL_FILES_JQ_FILTER_LENGTH = 16000;
+
+function stepPatchLine(line, rightLine, rightLines) {
+  const hunk = line.match(HUNK_HEADER_RE);
+  if (hunk) {
+    return Number(hunk[1]);
+  }
+  if (rightLine === null) return null;
+  if (line.startsWith('+') || line.startsWith(' ')) {
+    rightLines.add(rightLine);
+    return rightLine + 1;
+  }
+  return rightLine;
+}
+
+function parsePatchRightLines(patchText) {
+  const rightLines = new Set();
+  if (typeof patchText !== 'string' || !patchText) return rightLines;
+  let rightLine = null;
+  for (const line of patchText.split(/\r?\n/)) {
+    rightLine = stepPatchLine(line, rightLine, rightLines);
+  }
+  return rightLines;
+}
+
 function parseRightLinesByPath(diffText) {
   const result = new Map();
   let currentPath = null;
@@ -134,29 +160,13 @@ function parseRightLinesByPath(diffText) {
       rightLine = null;
       continue;
     }
-    if (line.startsWith('+++ b/')) {
+    if (rightLine === null && line.startsWith('+++ b/')) {
       currentPath = line.slice('+++ b/'.length);
       if (!result.has(currentPath)) result.set(currentPath, new Set());
       continue;
     }
     if (!currentPath) continue;
-    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (hunk) {
-      rightLine = Number(hunk[1]);
-      continue;
-    }
-    if (rightLine === null) continue;
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      result.get(currentPath).add(rightLine);
-      rightLine++;
-    } else if (line.startsWith(' ')) {
-      result.get(currentPath).add(rightLine);
-      rightLine++;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      continue;
-    } else if (line === '\\ No newline at end of file') {
-      continue;
-    }
+    rightLine = stepPatchLine(line, rightLine, result.get(currentPath));
   }
 
   return result;
@@ -164,6 +174,86 @@ function parseRightLinesByPath(diffText) {
 
 function isLineInDiff(rightLinesByPath, filePath, line) {
   return Boolean(rightLinesByPath.get(filePath)?.has(line));
+}
+
+function buildPullFilesJqFilter(targetPaths) {
+  const targetsJson = JSON.stringify(targetPaths);
+  return `(${targetsJson} as $targets | .[] | select(.filename as $f | $targets | index($f) != null) | {filename, patch} | @json | @base64)`;
+}
+
+// 対象ファイル一覧が1回の argv に収まらない場合はバッチへ分割し、どの経路でも指摘外ファイルの patch を stdout へ流さない。
+function partitionTargetPathsForJq(targetPaths, maxFilterLength = MAX_PULL_FILES_JQ_FILTER_LENGTH) {
+  if (!Array.isArray(targetPaths) || targetPaths.length === 0) return [];
+  const batches = [];
+  let current = [];
+  for (const filePath of targetPaths) {
+    const candidate = [...current, filePath];
+    if (current.length > 0 && buildPullFilesJqFilter(candidate).length > maxFilterLength) {
+      batches.push(current);
+      current = [filePath];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+// `gh api --paginate --jq '... | @json | @base64'` の行出力をデコードする（finalize-issue.js と同形式）。
+function decodePrFilesBase64Lines(output) {
+  if (typeof output !== 'string') {
+    throw new Error('pulls/files response must be a string');
+  }
+  const lines = output.split(/\r?\n/).filter((line) => line.trim() !== '');
+  return lines.map((line, index) => {
+    let encoded = line.trim();
+    try {
+      const parsedLine = JSON.parse(encoded);
+      if (typeof parsedLine === 'string') encoded = parsedLine;
+    } catch { /* gh --jq may emit a scalar either raw or JSON-quoted */ }
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+      throw new Error(`pulls/files response item ${index + 1} is not valid base64`);
+    }
+    let item;
+    try {
+      item = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    } catch (error) {
+      throw new Error(`pulls/files response item ${index + 1} is not valid JSON: ${error.message}`);
+    }
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || typeof item.filename !== 'string' || !item.filename) {
+      throw new Error(`pulls/files response item ${index + 1} is missing a valid filename`);
+    }
+    if (item.patch !== undefined && item.patch !== null && typeof item.patch !== 'string') {
+      throw new Error(`pulls/files response item ${index + 1} (${item.filename}) has invalid patch type`);
+    }
+    return item;
+  });
+}
+
+function buildDiffIndexFromPrFiles(prFiles) {
+  if (!Array.isArray(prFiles)) {
+    throw new Error('prFiles must be an array');
+  }
+  const rightLinesByPath = new Map();
+  const omittedPatchPaths = new Set();
+  for (const [index, entry] of prFiles.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || typeof entry.filename !== 'string' || !entry.filename) {
+      throw new Error(`prFiles entry ${index + 1} is missing a valid filename`);
+    }
+    if (entry.patch === undefined || entry.patch === null) {
+      omittedPatchPaths.add(entry.filename);
+      rightLinesByPath.delete(entry.filename);
+      continue;
+    }
+    if (typeof entry.patch !== 'string') {
+      throw new Error(`prFiles entry ${index + 1} (${entry.filename}) has invalid patch type`);
+    }
+    omittedPatchPaths.delete(entry.filename);
+    rightLinesByPath.set(entry.filename, parsePatchRightLines(entry.patch));
+  }
+  return { rightLinesByPath, omittedPatchPaths };
 }
 
 function formatFindingHeading(finding) {
@@ -277,6 +367,30 @@ function postFinalReview(payload, body, spawnFn = spawnSync) {
   );
 }
 
+function fetchPrFiles(payload, targetPaths, spawnFn = spawnSync, maxFilterLength = MAX_PULL_FILES_JQ_FILTER_LENGTH) {
+  const uniquePaths = [...new Set(targetPaths)];
+  const batches = partitionTargetPathsForJq(uniquePaths, maxFilterLength);
+  const files = [];
+  for (const batch of batches) {
+    const jqFilter = buildPullFilesJqFilter(batch);
+    const stdout = runRequired(
+      'gh',
+      [
+        'api',
+        '--method', 'GET',
+        `repos/${payload.repo}/pulls/${payload.pr}/files`,
+        '-f', 'per_page=100',
+        '--paginate',
+        '--jq', jqFilter,
+      ],
+      {},
+      spawnFn
+    );
+    files.push(...decodePrFilesBase64Lines(stdout));
+  }
+  return files;
+}
+
 function processFindings(payload, options = {}) {
   const payloadValidation = validatePayload(payload);
   if (!payloadValidation.ok) {
@@ -292,8 +406,12 @@ function processFindings(payload, options = {}) {
   }
 
   const spawnFn = options.spawnFn || spawnSync;
-  const diffText = options.diffText ?? runRequired('gh', ['pr', 'diff', String(payload.pr), '--repo', payload.repo], {}, spawnFn);
-  const rightLinesByPath = parseRightLinesByPath(diffText);
+  const targetPaths = [...new Set(candidates.map(({ finding }) => finding.path))];
+  // 取得・デコード失敗は候補単位の file_unavailable / diff_outside_anchor へ落とさず例外として失敗させる。
+  const prFiles = options.prFiles !== undefined
+    ? options.prFiles
+    : (targetPaths.length > 0 ? fetchPrFiles(payload, targetPaths, spawnFn) : []);
+  const { rightLinesByPath, omittedPatchPaths } = buildDiffIndexFromPrFiles(prFiles);
   const cwd = options.cwd || process.cwd();
   const resolved = [];
   const unresolved = [];
@@ -307,6 +425,10 @@ function processFindings(payload, options = {}) {
       const lineResult = resolveLineAnchor(fileCache.get(finding.path), finding);
       if (lineResult.status !== 'resolved') {
         unresolved.push({ finding, status: lineResult.status, finding_number });
+        continue;
+      }
+      if (omittedPatchPaths.has(finding.path)) {
+        unresolved.push({ finding, status: 'patch_unavailable', resolved_line: lineResult.line, finding_number });
         continue;
       }
       if (!isLineInDiff(rightLinesByPath, finding.path, lineResult.line)) {
@@ -385,8 +507,14 @@ module.exports = {
   validatePayload,
   validateFinding,
   resolveLineAnchor,
+  parsePatchRightLines,
   parseRightLinesByPath,
   isLineInDiff,
+  buildPullFilesJqFilter,
+  partitionTargetPathsForJq,
+  decodePrFilesBase64Lines,
+  buildDiffIndexFromPrFiles,
+  fetchPrFiles,
   formatFindingHeading,
   formatFindingBody,
   formatFileFinding,

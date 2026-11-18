@@ -10,13 +10,13 @@ const { publishReviewArtifact } = require('../../scripts/run-review-manager');
 const { recordPath, ARTIFACTS } = require('../../scripts/shared/record-paths');
 const { createFakeGh } = require('../helpers/fake-gh');
 
-function writeArtifact(dir, pr = 42, repo = 'o/r') {
+function writeArtifact(dir, pr = 42, repo = 'o/r', findings = []) {
   const artifactPath = path.join(dir, 'manager.json');
   fs.writeFileSync(artifactPath, JSON.stringify({
     pr,
     repo,
     headRefOid: 'abc1234',
-    findings: [],
+    findings,
   }), 'utf8');
   return artifactPath;
 }
@@ -138,10 +138,10 @@ test('slow: review-publisher が非0終了したとき worker.log に status と
       binDir: path.join(dir, 'bin'),
       fixtures: [
         {
-          match: ['pr', 'diff', '42', '--repo', 'o/r'],
+          match: ['api', 'repos/o/r/pulls/42/reviews', '-X', 'POST', '-F', 'body=@-', '-f', 'event=COMMENT'],
           status: 2,
-          stdout: 'diff --git a/partial-nonzero.js b/partial-nonzero.js\n+partial\n',
-          stderr: 'gh: PR diff failed (HTTP 502)\n',
+          stdout: 'partial-nonzero-stdout\n',
+          stderr: 'gh: PR review post failed (HTTP 502)\n',
         },
       ],
     });
@@ -157,8 +157,60 @@ test('slow: review-publisher が非0終了したとき worker.log に status と
     assert.equal(publish.status, 1);
     const workerLog = fs.readFileSync(logFile, 'utf8');
     assert.match(workerLog, /status=2/);
-    assert.match(workerLog, /stderr=gh: PR diff failed \(HTTP 502\)/);
+    assert.match(workerLog, /stderr=gh: PR review post failed \(HTTP 502\)/);
     assert.match(workerLog, /review-publisher exited with status 1/);
-    assert.doesNotMatch(workerLog, /diff --git a\/partial-nonzero\.js/);
+    assert.doesNotMatch(workerLog, /partial-nonzero-stdout/);
+  });
+});
+
+test('slow: pulls/{n}/files の取得失敗時はファイル単位投稿や最終レビューへ進まず失敗理由が worker.log に残る', () => {
+  withTempDir('ghm-slow-rm-files-fail-', (dir) => {
+    const artifactPath = writeArtifact(dir, 42, 'o/r', [
+      {
+        aspect: 'Correctness',
+        path: 'src/foo.ts',
+        line_anchor: 'save()',
+        summary: 'Save is not awaited',
+        severity: 'BLOCKER',
+        severity_rationale: 'data loss',
+        body: 'await save()',
+        verified_references: ['src/foo.ts'],
+      },
+    ]);
+    const { logFile, log } = createWorkerLogger(dir, 42, 'issue-789-review-manager-pr-42');
+    const fakeGh = createFakeGh({
+      binDir: path.join(dir, 'bin'),
+      fixtures: [
+        {
+          match: { prefix: ['api', '--method', 'GET', 'repos/o/r/pulls/42/files'] },
+          status: 2,
+          stdout: 'partial-files-stdout\n',
+          stderr: 'gh: pulls/files failed (HTTP 502)\n',
+        },
+      ],
+    });
+
+    const publish = publishReviewArtifact({
+      outputFile: artifactPath,
+      workspace: dir,
+      lockOwner: 'test-owner',
+      log,
+      env: fakeGh.env,
+    });
+
+    assert.equal(publish.status, 1);
+    const workerLog = fs.readFileSync(logFile, 'utf8');
+    assert.match(workerLog, /status=2/);
+    assert.match(workerLog, /stderr=gh: pulls\/files failed \(HTTP 502\)/);
+    assert.match(workerLog, /review-publisher exited with status 1/);
+    assert.doesNotMatch(workerLog, /partial-files-stdout/);
+
+    const calls = fs.readFileSync(fakeGh.logPath, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args.slice(0, 4), ['api', '--method', 'GET', 'repos/o/r/pulls/42/files']);
   });
 });
