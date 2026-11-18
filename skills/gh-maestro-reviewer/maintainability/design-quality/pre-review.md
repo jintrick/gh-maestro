@@ -12,7 +12,7 @@
    - `git ls-tree <BASE_OID> -- AGENTS.md` で存在を確かめ、出力があれば `git show <BASE_OID>:AGENTS.md` で読む（空なら存在しない）。
    - `git ls-tree` または `git show` 自体が失敗した場合は、取得失敗とする。
 4. `.claude/rules/` から PR の変更ファイルに関係するルールだけを `BASE_OID` に対して特定し、読む:
-   - プロンプトの `### 変更ファイル一覧` にある各ファイルパス（`(情報なし)` の場合は `git diff --name-only <BASE_OID> HEAD` で取得）を渡し、`node "{{SCRIPTS_PATH}}/find-matching-rules.js" --ref <BASE_OID> <変更ファイル...>` を実行する（`git diff` が失敗したら取得失敗とする）。
+   - プロンプトの `### 変更ファイル一覧` にある各ファイルパス（`(情報なし)` の場合は `git diff --name-only <BASE_OID>...HEAD` で取得）を渡し、`node "{{SCRIPTS_PATH}}/find-matching-rules.js" --ref <BASE_OID> <変更ファイル...>` を実行する（`git diff` が失敗したら取得失敗とする）。
    - `find-matching-rules.js` が非ゼロ終了した場合は取得失敗とする（「当てはまるルールなし」として続けない）。
    - 終了コード `0` で出力が空のときは、`.claude/rules/` が無いか、変更ファイルに `paths:` が当てはまるルールが 0 件である（`paths:` を持たないルールも読まない）。
    - 出力された各パスだけを `git show <BASE_OID>:<path>` で読む。`git show` が失敗した場合は取得失敗とする。

@@ -32,7 +32,7 @@ function parseTreeEntries(output) {
   return entries;
 }
 
-function runGit(args, cwd, spawnSyncFn) {
+function runGit(args, cwd, spawnSyncFn = spawnSync) {
   let result;
   try {
     result = spawnSyncFn('git', args, {
@@ -90,4 +90,4 @@ function readFileAtRef(cwd, ref, filePath, { spawnSyncFn = spawnSync } = {}) {
   };
 }
 
-module.exports = { readFileAtRef, parseTreeEntries, normalizeGitPath, OBJECT_ID_RE };
+module.exports = { runGit, readFileAtRef, parseTreeEntries, normalizeGitPath, OBJECT_ID_RE };

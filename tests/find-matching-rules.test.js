@@ -322,12 +322,28 @@ test('findMatchingRulesAtRef: rev-parse 失敗・例外・ls-tree 失敗・不�
       expectedErr: /git ls-tree .* に失敗しました/,
     },
     {
-      name: 'ls-tree malformed entry',
+      name: 'ls-tree malformed entry (missing tab)',
       spawnSyncFn: makeMockGitSpawn({
         revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
         lsTree: () => ({ status: 0, stdout: 'malformed-record-without-tab\0', stderr: '' }),
       }),
       expectedErr: /malformed entry/,
+    },
+    {
+      name: 'ls-tree invalid entry (non-hex OID)',
+      spawnSyncFn: makeMockGitSpawn({
+        revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+        lsTree: () => ({ status: 0, stdout: '100644 blob not-a-hex\t.claude/rules/a.md\0', stderr: '' }),
+      }),
+      expectedErr: /invalid entry/,
+    },
+    {
+      name: 'ls-tree invalid entry (empty path)',
+      spawnSyncFn: makeMockGitSpawn({
+        revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+        lsTree: () => ({ status: 0, stdout: `100644 blob ${blobOid}\t\0`, stderr: '' }),
+      }),
+      expectedErr: /invalid entry/,
     },
     {
       name: 'readFileAtRef unknown failure after one rule matched',

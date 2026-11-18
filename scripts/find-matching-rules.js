@@ -6,7 +6,7 @@ const path = require('path');
 const { parseFrontmatter } = require('./sync-rules');
 const { parseFlags } = require('./shared/workspace');
 const { spawnSync } = require('./shared/child-process');
-const { readFileAtRef, parseTreeEntries, normalizeGitPath } = require('./shared/git-ref');
+const { runGit, readFileAtRef, parseTreeEntries, normalizeGitPath } = require('./shared/git-ref');
 
 const SPEC = {
   flags: { '--root': {}, '--ref': {} },
@@ -91,30 +91,8 @@ function matchesRuleContent(content, files) {
   return files.some(f => matchesAny(f, globs));
 }
 
-function runGit(root, args, spawnSyncFn) {
-  let result;
-  try {
-    result = spawnSyncFn('git', args, {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
-  } catch (error) {
-    return { ok: false, error: error.message };
-  }
-  if (!result || result.error || result.status === null || result.status === undefined) {
-    return {
-      ok: false,
-      error: result?.error?.message || 'git process did not provide an exit status',
-    };
-  }
-  if (result.status !== 0) {
-    return {
-      ok: false,
-      error: String(result.stderr || '').trim() || `exit code ${result.status}`,
-    };
-  }
-  return { ok: true, stdout: String(result.stdout || '') };
+function gitErrorDetail(result) {
+  return result.error || result.stderr.trim() || `exit code ${result.exitCode}`;
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -188,9 +166,9 @@ function findMatchingRulesAtRef(root, ref, files, { spawnSyncFn = spawnSync } = 
     return { matched, errors };
   }
 
-  const revResult = runGit(root, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], spawnSyncFn);
-  if (!revResult.ok) {
-    errors.push(`--ref (${ref}) を解決できません: ${revResult.error}`);
+  const revResult = runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], root, spawnSyncFn);
+  if (revResult.status !== 'ok') {
+    errors.push(`--ref (${ref}) を解決できません: ${gitErrorDetail(revResult)}`);
     return { matched, errors };
   }
   const commitOid = revResult.stdout.trim();
@@ -200,12 +178,12 @@ function findMatchingRulesAtRef(root, ref, files, { spawnSyncFn = spawnSync } = 
   }
 
   const lsResult = runGit(
-    root,
     ['ls-tree', '-r', '-z', '--end-of-options', commitOid, '--', '.claude/rules/'],
+    root,
     spawnSyncFn,
   );
-  if (!lsResult.ok) {
-    errors.push(`git ls-tree (${commitOid}) に失敗しました: ${lsResult.error}`);
+  if (lsResult.status !== 'ok') {
+    errors.push(`git ls-tree (${commitOid}) に失敗しました: ${gitErrorDetail(lsResult)}`);
     return { matched, errors };
   }
 
