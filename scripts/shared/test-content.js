@@ -13,9 +13,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('./child-process');
+const { parseTreeEntries, normalizeGitPath, OBJECT_ID_RE } = require('./git-ref');
 
 const CONTENT_HASH_VERSION = 'git-blob-snapshot-v1';
-const OBJECT_ID_RE = /^[0-9a-f]{40,64}$/i;
 
 function gitError(args, result) {
   const stderr = String(result && result.stderr || '').trim();
@@ -31,10 +31,6 @@ function runGit(worktree, args, options = {}, spawnSyncFn = spawnSync) {
   });
   if (!result || result.error || result.status !== 0) throw gitError(args, result);
   return String(result.stdout || '');
-}
-
-function normalizeGitPath(value) {
-  return value.replace(/\\/g, '/');
 }
 
 function hashEntries(entries) {
@@ -120,22 +116,6 @@ function calculateWorktreeContentHash(worktree, { spawnSyncFn = spawnSync } = {}
     throw new Error('git hash-object returned an unexpected number or form of object IDs');
   }
   return hashEntries(paths.map((path, index) => ({ path, objectId: objectIds[index] })));
-}
-
-function parseTreeEntries(output) {
-  const entries = [];
-  for (const record of output.split('\0').filter(Boolean)) {
-    const separator = record.indexOf('\t');
-    if (separator < 0) throw new Error('git ls-tree returned a malformed entry');
-    const header = record.slice(0, separator).split(' ');
-    const relativePath = normalizeGitPath(record.slice(separator + 1));
-    const objectId = header[2];
-    if (!relativePath || !objectId || !OBJECT_ID_RE.test(objectId)) {
-      throw new Error('git ls-tree returned an invalid entry');
-    }
-    entries.push({ path: relativePath, objectId });
-  }
-  return entries;
 }
 
 /**
