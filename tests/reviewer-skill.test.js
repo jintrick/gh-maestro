@@ -34,3 +34,11 @@ test('gh-maestro-reviewer: フェーズ2手順は finalize-review.js と統合�
   assert.match(phase2, /finalize-review\.js/);
   assert.match(phase2, /verified_references/);
 });
+
+test('gh-maestro-reviewer: maintainability/design-quality/pre-review.md は find-matching-rules.js --ref <BASE_OID> で一致ルールだけを読む', () => {
+  const preReview = readSkillAsset(path.join('maintainability', 'design-quality', 'pre-review.md'));
+  assert.match(preReview, /node "\{\{SCRIPTS_PATH\}\}\/find-matching-rules\.js" --ref <BASE_OID>/);
+  assert.doesNotMatch(preReview, /git ls-tree[^\n]*-- \.claude\/rules\//);
+  assert.match(preReview, /非ゼロ終了.*取得失敗/);
+  assert.match(preReview, /0 件[\s\S]*取得失敗とは区別/);
+});

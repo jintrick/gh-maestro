@@ -7,7 +7,13 @@ const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
 
-const { globToRegex, matchesAny, findMatchingRules } = require('../scripts/find-matching-rules');
+const {
+  globToRegex,
+  matchesAny,
+  findMatchingRules,
+  findMatchingRulesAtRef,
+  main,
+} = require('../scripts/find-matching-rules');
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'find-matching-rules.js');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -177,6 +183,187 @@ test('findMatchingRules: frontmatterなしのルールはスキップする', ()
     assert.deepEqual(matched, []);
     assert.deepEqual(errors, []);
   });
+});
+
+test('findMatchingRules: サブディレクトリ配下のルールも対象にし、一致しないサブディレクトリは除外する', () => {
+  withTempDir(dir => {
+    const subDir = path.join(dir, '.claude', 'rules', 'backend', 'api');
+    const otherDir = path.join(dir, '.claude', 'rules', 'frontend');
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.mkdirSync(otherDir, { recursive: true });
+    fs.writeFileSync(path.join(subDir, 'endpoint.md'),
+      `---\npaths:\n  - "api/**/*.ts"\n---\n# API Rule`);
+    fs.writeFileSync(path.join(otherDir, 'ui.md'),
+      `---\npaths:\n  - "web/**/*.tsx"\n---\n# UI Rule`);
+
+    const { matched, errors } = findMatchingRules(dir, ['api/v1/users.ts']);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(matched, ['.claude/rules/backend/api/endpoint.md']);
+  });
+});
+
+test('findMatchingRules: 作業ツリー読取失敗時は errors を返し matched を空にする (exit 1)', () => {
+  withTempDir(dir => {
+    // .claude/rules が通常ファイルとして存在すると readdirSync が ENOTDIR で失敗する
+    fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.claude', 'rules'), 'not-a-directory');
+
+    const res = main(['--root', dir, 'scripts/foo.js']);
+    assert.equal(res.exitCode, 1);
+    assert.equal(res.stdout, '');
+    assert.match(res.stderr, /\.claude\/rules\/ の読み取りに失敗しました/);
+  });
+});
+
+// ── findMatchingRulesAtRef (--ref / git-ref 連携) ─────────────────────────────
+
+function makeMockGitSpawn({
+  revParse = () => ({ status: 0, stdout: 'a'.repeat(40) + '\n', stderr: '' }),
+  lsTree = () => ({ status: 0, stdout: '', stderr: '' }),
+  showRef = (oid) => ({ status: 0, stdout: oid + '\n', stderr: '' }),
+  showFile = () => ({ status: 1, stdout: '', stderr: 'fatal: path does not exist' }),
+  recordedArgvs = [],
+} = {}) {
+  return (cmd, args) => {
+    assert.equal(cmd, 'git');
+    recordedArgvs.push(args);
+    if (args[0] === 'rev-parse') return revParse(args);
+    if (args[0] === 'ls-tree') return lsTree(args);
+    if (args[0] === 'show' && args[1] === '--quiet') return showRef(args[3]);
+    if (args[0] === 'show') return showFile(args[1]);
+    throw new Error(`unexpected git args: ${JSON.stringify(args)}`);
+  };
+}
+
+test('findMatchingRulesAtRef: --ref 解決→ls-tree→readFileAtRef で一致ルールだけ返し symlink(120000) と paths なしを除外する', () => {
+  const oid = '1'.repeat(40);
+  const blobOid1 = '2'.repeat(40);
+  const blobOid2 = '3'.repeat(40);
+  const blobOid3 = '4'.repeat(40);
+  const blobOid4 = '5'.repeat(40);
+  const recordedArgvs = [];
+  const lsOutput = [
+    `100644 blob ${blobOid1}\t.claude/rules/match.md`,
+    `100644 blob ${blobOid2}\t.claude/rules/sub/nested.md`,
+    `100644 blob ${blobOid3}\t.claude/rules/no-paths.md`,
+    `120000 blob ${blobOid4}\t.claude/rules/symlink.md`,
+    `100644 blob ${blobOid4}\t.claude/rules/notes.txt`,
+  ].join('\0') + '\0';
+
+  const files = new Map([
+    [`${oid}:.claude/rules/match.md`, '---\npaths:\n  - "scripts/**/*.js"\n---\n# Match'],
+    [`${oid}:.claude/rules/sub/nested.md`, '---\npaths:\n  - "docs/**/*.md"\n---\n# Nested'],
+    [`${oid}:.claude/rules/no-paths.md`, '---\nother: value\n---\n# No paths'],
+  ]);
+
+  const spawnSyncFn = makeMockGitSpawn({
+    revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+    lsTree: () => ({ status: 0, stdout: lsOutput, stderr: '' }),
+    showFile: (spec) => files.has(spec)
+      ? { status: 0, stdout: files.get(spec), stderr: '' }
+      : { status: 1, stdout: '', stderr: `fatal: path '${spec}' does not exist` },
+    recordedArgvs,
+  });
+
+  const res = main(['--root', '/repo', '--ref', 'base-branch', 'scripts/a.js'], { spawnSyncFn });
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.stderr, '');
+  assert.equal(res.stdout, '.claude/rules/match.md');
+  assert.deepEqual(recordedArgvs[0], ['rev-parse', '--verify', '--end-of-options', 'base-branch^{commit}']);
+  assert.deepEqual(recordedArgvs[1], ['ls-tree', '-r', '-z', '--end-of-options', oid, '--', '.claude/rules/']);
+});
+
+test('findMatchingRulesAtRef: .claude/rules/ 不在・一致0件では exitCode 0・空 stdout になる', () => {
+  const oid = 'a'.repeat(40);
+  const emptyTreeSpawn = makeMockGitSpawn({
+    revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+    lsTree: () => ({ status: 0, stdout: '', stderr: '' }),
+  });
+  const emptyRes = main(['--root', '/repo', '--ref', 'HEAD', 'scripts/a.js'], { spawnSyncFn: emptyTreeSpawn });
+  assert.equal(emptyRes.exitCode, 0);
+  assert.equal(emptyRes.stdout, '');
+  assert.equal(emptyRes.stderr, '');
+
+  const noMatchSpawn = makeMockGitSpawn({
+    revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+    lsTree: () => ({ status: 0, stdout: `100644 blob ${'b'.repeat(40)}\t.claude/rules/only-docs.md\0`, stderr: '' }),
+    showFile: () => ({ status: 0, stdout: '---\npaths:\n  - "docs/**"\n---\n# Docs', stderr: '' }),
+  });
+  const noMatchRes = main(['--root', '/repo', '--ref', 'HEAD', 'scripts/a.js'], { spawnSyncFn: noMatchSpawn });
+  assert.equal(noMatchRes.exitCode, 0);
+  assert.equal(noMatchRes.stdout, '');
+  assert.equal(noMatchRes.stderr, '');
+});
+
+test('findMatchingRulesAtRef: rev-parse 失敗・例外・ls-tree 失敗・不正エントリ・git show 失敗/欠落をすべて exit 1 にする', () => {
+  const oid = 'c'.repeat(40);
+  const blobOid = 'd'.repeat(40);
+  const lsEntry = [`100644 blob ${blobOid}\t.claude/rules/a.md`, `100644 blob ${blobOid}\t.claude/rules/b.md`].join('\0') + '\0';
+
+  const cases = [
+    {
+      name: 'rev-parse non-zero',
+      spawnSyncFn: makeMockGitSpawn({
+        revParse: () => ({ status: 128, stdout: '', stderr: 'fatal: Needed a single revision' }),
+      }),
+      expectedErr: /--ref .* を解決できません/,
+    },
+    {
+      name: 'rev-parse throws',
+      spawnSyncFn: () => { throw new Error('spawn failed'); },
+      expectedErr: /spawn failed/,
+    },
+    {
+      name: 'ls-tree non-zero',
+      spawnSyncFn: makeMockGitSpawn({
+        revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+        lsTree: () => ({ status: 128, stdout: '', stderr: 'fatal: not a tree object' }),
+      }),
+      expectedErr: /git ls-tree .* に失敗しました/,
+    },
+    {
+      name: 'ls-tree malformed entry',
+      spawnSyncFn: makeMockGitSpawn({
+        revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+        lsTree: () => ({ status: 0, stdout: 'malformed-record-without-tab\0', stderr: '' }),
+      }),
+      expectedErr: /malformed entry/,
+    },
+    {
+      name: 'readFileAtRef unknown failure after one rule matched',
+      spawnSyncFn: makeMockGitSpawn({
+        revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+        lsTree: () => ({ status: 0, stdout: lsEntry, stderr: '' }),
+        showFile: (spec) => spec.endsWith('a.md')
+          ? { status: 0, stdout: '---\npaths:\n  - "scripts/**"\n---\n# A', stderr: '' }
+          : { status: 128, stdout: '', stderr: 'fatal: unable to read blob' },
+      }),
+      expectedErr: /読み取りに失敗しました/,
+    },
+    {
+      name: 'readFileAtRef unexpected absent after ls-tree',
+      spawnSyncFn: makeMockGitSpawn({
+        revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
+        lsTree: () => ({ status: 0, stdout: lsEntry, stderr: '' }),
+        showFile: (spec) => spec.endsWith('a.md')
+          ? { status: 0, stdout: '---\npaths:\n  - "scripts/**"\n---\n# A', stderr: '' }
+          : { status: 128, stdout: '', stderr: `fatal: path '.claude/rules/b.md' does not exist in '${oid}'` },
+      }),
+      expectedErr: /is not present/,
+    },
+  ];
+
+  for (const c of cases) {
+    const res = main(['--root', '/repo', '--ref', 'base', 'scripts/foo.js'], { spawnSyncFn: c.spawnSyncFn });
+    assert.equal(res.exitCode, 1, `${c.name}: exitCode should be 1`);
+    assert.equal(res.stdout, '', `${c.name}: stdout must be empty on error (no partial match)`);
+    assert.match(res.stderr, c.expectedErr, `${c.name}: stderr mismatch`);
+  }
+
+  // 直接関数呼び出しで ref が非文字列のケースも拒否されること
+  const directInvalid = findMatchingRulesAtRef('/repo', null, ['scripts/foo.js']);
+  assert.deepEqual(directInvalid.matched, []);
+  assert.equal(directInvalid.errors.length, 1);
 });
 
 // ── CLI integration ──────────────────────────────────────────────────────────

@@ -76,3 +76,10 @@ test('質問投稿の手順（--body-file）は共通ファイルと base スキ
   assert.match(base, /msg-send\.js"? --body-file <質問本文ファイルのパス>/);
 });
 
+test('rules-check-step.md はサブディレクトリを含む表記と非ゼロ終了の失敗扱いを明記する', () => {
+  const content = fs.readFileSync(path.join(PARTIALS_DIR, 'rules-check-step.md'), 'utf8');
+  assert.match(content, /\.claude\/rules\/\*\*\/\*\.md/);
+  assert.match(content, /find-matching-rules\.js/);
+  assert.match(content, /非ゼロ終了[\s\S]*失敗として扱う/);
+});
+

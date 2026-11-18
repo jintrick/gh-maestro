@@ -8,6 +8,29 @@
 const { spawnSync } = require('./child-process');
 
 const MISSING_PATH_RE = /(?:does not exist|exists on disk, but not in|path .* does not exist)/i;
+const OBJECT_ID_RE = /^[0-9a-f]{40,64}$/i;
+
+function normalizeGitPath(value) {
+  return value.replace(/\\/g, '/');
+}
+
+function parseTreeEntries(output) {
+  const entries = [];
+  for (const record of output.split('\0').filter(Boolean)) {
+    const separator = record.indexOf('\t');
+    if (separator < 0) throw new Error('git ls-tree returned a malformed entry');
+    const header = record.slice(0, separator).split(' ');
+    const mode = header[0];
+    const type = header[1];
+    const objectId = header[2];
+    const relativePath = normalizeGitPath(record.slice(separator + 1));
+    if (!mode || !type || !relativePath || !objectId || !OBJECT_ID_RE.test(objectId)) {
+      throw new Error('git ls-tree returned an invalid entry');
+    }
+    entries.push({ mode, type, path: relativePath, objectId });
+  }
+  return entries;
+}
 
 function runGit(args, cwd, spawnSyncFn) {
   let result;
@@ -67,4 +90,4 @@ function readFileAtRef(cwd, ref, filePath, { spawnSyncFn = spawnSync } = {}) {
   };
 }
 
-module.exports = { readFileAtRef };
+module.exports = { readFileAtRef, parseTreeEntries, normalizeGitPath, OBJECT_ID_RE };
