@@ -224,3 +224,27 @@ test('createPrComment / ghErrorDetail: NODE_TEST_CONTEXT 既定ガードと allo
   assert.equal(ghComments.ghErrorDetail({ status: 1, stderr: '  stderr err \n', error: new Error('ignored') }), 'stderr err');
   assert.equal(ghComments.ghErrorDetail({ status: 1, stderr: '' }, { fallback: '(fallback)' }), '(fallback)');
 });
+
+test('ghErrorDetail: includeStdout=true でも error または signal がある場合は途中 stdout で原因を隠さない', () => {
+  assert.equal(
+    ghComments.ghErrorDetail(
+      { status: null, signal: 'SIGTERM', stdout: 'diff --git partial', stderr: '', error: new Error('spawnSync gh ENOBUFS') },
+      { includeStdout: true, fallback: '' }
+    ),
+    'spawnSync gh ENOBUFS'
+  );
+  assert.equal(
+    ghComments.ghErrorDetail(
+      { status: null, signal: 'SIGKILL', stdout: 'diff --git partial', stderr: '' },
+      { includeStdout: true, fallback: '(no stderr)' }
+    ),
+    '(no stderr)'
+  );
+  assert.equal(
+    ghComments.ghErrorDetail(
+      { status: 1, signal: null, stdout: '{"message":"Validation Failed"}', stderr: '' },
+      { includeStdout: true, fallback: '' }
+    ),
+    '{"message":"Validation Failed"}'
+  );
+});

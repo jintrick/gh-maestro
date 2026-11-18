@@ -87,10 +87,12 @@ function createPrComment(repo, pr, body, opts = {}) {
 
 /**
  * `spawnSync` の戻り値から失敗理由を抽出する（`stderr` が空でも `error.message` を失わない）。
+ * 起動・実行エラー（`error`）やシグナル終了（`signal`）時は、途中までの `stdout` が原因を隠さないよう `stdout` を採用しない。
  */
 function ghErrorDetail(result, { includeStdout = false, fallback = '(no stderr)' } = {}) {
   if (!result) return fallback;
-  const candidates = [result.stderr, includeStdout ? result.stdout : '', result.error && result.error.message];
+  const allowStdout = includeStdout && !result.error && !result.signal;
+  const candidates = [result.stderr, result.error && result.error.message, allowStdout ? result.stdout : ''];
   for (const raw of candidates) {
     if (typeof raw === 'string' && raw.trim()) return raw.trim();
   }

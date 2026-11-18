@@ -534,6 +534,7 @@ module.exports = {
   pollForArtifact, validateArtifactContent,
   atomicCopyStaging, boundedCleanup,
   superviseReviewManager,
+  publishReviewArtifact,
   runReviewJobsOnce, runJobsDeterministically, judgeJobRun, superviseAgentPhase, mapAgentPhaseFailure,
   clearStaleIncompleteSentinel,
   resetRetryCount,
@@ -1081,6 +1082,39 @@ function mapAgentPhaseFailure(phase, reviewWtDir) {
   return { outcome: 'setup-failed', exitCode: phase.exitCode || 1, artifact: null, agentPid: phase.agentPid, agentRef: phase.agentRef, reviewWtDir, reason: phase.reason || phase.outcome };
 }
 
+function publishReviewArtifact({
+  outputFile,
+  workspace,
+  lockOwner,
+  log,
+  env = process.env,
+  spawnSyncFn = spawnSync,
+}) {
+  const publish = spawnSyncFn(process.execPath, [
+    path.join(__dirname, 'review-publisher.js'),
+    outputFile,
+  ], {
+    cwd: workspace,
+    encoding: 'utf8',
+    env: (() => {
+      const nextEnv = { ...env, GH_MAESTRO_REVIEW_PARENT_REF: lockOwner || processLiveness.captureSelf() };
+      delete nextEnv.GH_MAESTRO_RESOURCE_KEY;
+      delete nextEnv.GH_MAESTRO_INSTANCE_ID;
+      return nextEnv;
+    })(),
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (publish.stdout) log(publish.stdout);
+  if (publish.stderr) log(publish.stderr);
+  const publishExitParts = [
+    `status ${publish.status}`,
+    ...(publish.signal ? [`signal ${publish.signal}`] : []),
+    ...(publish.error ? [`error ${publish.error.message}`] : []),
+  ];
+  log(`review-publisher exited with ${publishExitParts.join(', ')}`);
+  return publish;
+}
+
 /**
  * Review Manager を2フェーズで監督する。
  *
@@ -1285,23 +1319,7 @@ async function superviseReviewManager({
     return { outcome: 'process-exit-no-artifact', exitCode: 1, artifact: null, agentPid: phase2.agentPid, agentRef: phase2.agentRef, reviewWtDir, reason: `レビュー成果物の世代記録保存に失敗: ${error.message}` };
   }
 
-  const publish = spawnSync(process.execPath, [
-    path.join(__dirname, 'review-publisher.js'),
-    outputFile,
-  ], {
-    cwd: workspace,
-    encoding: 'utf8',
-    env: (() => {
-      const env = { ...process.env, GH_MAESTRO_REVIEW_PARENT_REF: lockOwner || processLiveness.captureSelf() };
-      delete env.GH_MAESTRO_RESOURCE_KEY;
-      delete env.GH_MAESTRO_INSTANCE_ID;
-      return env;
-    })(),
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  if (publish.stdout) log(publish.stdout);
-  if (publish.stderr) log(publish.stderr);
-  log(`review-publisher exited with status ${publish.status}`);
+  const publish = publishReviewArtifact({ outputFile, workspace, lockOwner, log });
 
   if (publish.status === 0) {
     try {
