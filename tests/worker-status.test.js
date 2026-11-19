@@ -108,6 +108,7 @@ beforeEach(() => {
   testWorkerPredicate = null;
   installTestLiveness();
   workerStatus._setFindRunningInstances(() => []);
+  workerStatus._setReadCycleEvents(null);
 // Review-manager fixtures below inject their liveness observations; the
 // non-identity-focused cases use a deterministic checker instead of WMI.
   // pane の各入力・出力ケースは、明示的な lock 拒否ケース以外では
@@ -182,7 +183,8 @@ test('main: --help は code 0 で usage を返し、新しい説明を含み旧�
   assert.equal(result.code, 0);
   const helpText = result.lines.join('\n');
   assert.match(helpText, /worker-status\.js/);
-  assert.match(helpText, /list\s+見出しとワーカーの稼働状況を表示する/);
+  assert.match(helpText, /list\s+状態付きワーカー行を表示する/);
+  assert.match(helpText, /running \/ abnormal \/ stopped/);
   assert.match(helpText, /watch\s+見出しとワーカー行を画面クリアしながら定期更新する/);
   assert.match(helpText, /見出しとワーカー行/);
   assert.doesNotMatch(helpText, /6区間/);
@@ -444,13 +446,13 @@ test('snapshot: 見出しと最大4行のワーカー行（役職・モデル・
 
 });
 
-test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残数を表示する', () => {
+test('renderWorkerRows: status値を使って異常終了を文字で示し、resume回数と残数を保つ', () => {
   const lines = workerStatus.renderWorkerRows([
-    { role: 'senior-coder', runNumber: 2, agentId: 'codex', running: true, durationKnown: true, elapsedSeconds: 180, pid: 2, startTime: '2026-08-26T01:00:00Z' },
-    { role: 'explorer', agentId: 'agy', running: true, durationKnown: true, elapsedSeconds: 60, pid: 3, startTime: '2026-08-26T01:10:00Z' },
-    { role: 'review-manager', agentId: 'agy', running: false, abnormal: true, durationKnown: true, elapsedSeconds: 30, pid: 4, startTime: '2026-08-26T01:20:00Z' },
-    { role: 'architect', agentId: 'agy', running: false, durationKnown: true, elapsedSeconds: 30, pid: 5, startTime: '2026-08-26T01:30:00Z' },
-    { role: 'coder', agentId: 'agy', running: false, durationKnown: true, elapsedSeconds: 30, pid: 6, startTime: '2026-08-26T01:40:00Z' },
+    { role: 'senior-coder', runNumber: 2, agentId: 'codex', status: 'running', running: true, durationKnown: true, elapsedSeconds: 180, pid: 2, startTime: '2026-08-26T01:00:00Z' },
+    { role: 'explorer', agentId: 'agy', status: 'running', running: true, durationKnown: true, elapsedSeconds: 60, pid: 3, startTime: '2026-08-26T01:10:00Z' },
+    { role: 'review-manager', agentId: 'agy', status: 'abnormal', running: false, abnormal: true, durationKnown: true, elapsedSeconds: 30, pid: 4, startTime: '2026-08-26T01:20:00Z' },
+    { role: 'architect', agentId: 'agy', status: 'stopped', running: false, durationKnown: true, elapsedSeconds: 30, pid: 5, startTime: '2026-08-26T01:30:00Z' },
+    { role: 'coder', agentId: 'agy', status: 'stopped', running: false, durationKnown: true, elapsedSeconds: 30, pid: 6, startTime: '2026-08-26T01:40:00Z' },
   ], { maxRows: 4, colorize: true });
 
   assert.equal(lines.length, 4);
@@ -459,7 +461,10 @@ test('renderWorkerRows: 稼働優先・resume回数・状態ドット色・残�
   assert.ok(lines[1].includes('explorer') && lines[1].includes('(pid: 3)'));
   assert.ok(lines[2].includes('review-manager') && lines[2].includes('(pid: 4)'));
   assert.ok(lines[3].includes('architect') && lines[3].includes('(pid: 5)') && lines[3].includes('+1件'));
-  assert.ok(lines.every(line => !line.includes('[running]') && !line.includes('[stopped]') && !line.includes('█')));
+  assert.ok(lines[0].includes('[running]'));
+  assert.ok(lines[2].includes('[abnormal]'));
+  assert.ok(lines[3].includes('[stopped]'));
+  assert.ok(lines.every(line => !line.includes('█')));
 });
 
 test('mergeCycleWorkers: PID変更後は現在runの状態だけを採用し、履歴の異常停止を持ち越さない', () => {
@@ -531,6 +536,7 @@ test('renderWorkerRows: 子行があっても最後の表示ワーカーに非�
     {
       role: 'review-manager',
       agentId: 'codex',
+      status: 'running',
       running: true,
       durationKnown: true,
       elapsedSeconds: 300,
@@ -550,6 +556,7 @@ test('renderWorkerRows: 子行があっても最後の表示ワーカーに非�
     {
       role: 'explorer',
       agentId: 'codex',
+      status: 'running',
       running: true,
       durationKnown: true,
       elapsedSeconds: 60,
@@ -566,8 +573,8 @@ test('renderWorkerRows: 子行があっても最後の表示ワーカーに非�
 test('renderWorkerRows: role と agent を含む行を出し、suffixはASCII xNにする', () => {
   // 列の桁位置は見た目であり検査しない（ADR-0033）。検査するのは内容（役割・suffix の表記）。
   const lines = workerStatus.renderWorkerRows([
-    { role: 'coder', agentId: 'a', running: true, durationKnown: true, elapsedSeconds: 60, pid: 1 },
-    { role: 'senior-coder', runNumber: 2, agentId: 'long-agent', running: true, durationKnown: true, elapsedSeconds: 120, pid: 2 },
+    { role: 'coder', agentId: 'a', status: 'running', running: true, durationKnown: true, elapsedSeconds: 60, pid: 1 },
+    { role: 'senior-coder', runNumber: 2, agentId: 'long-agent', status: 'running', running: true, durationKnown: true, elapsedSeconds: 120, pid: 2 },
   ]);
   const plain = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''));
   assert.ok(plain[0].includes('coder') && plain[1].includes('senior-coder'));
@@ -717,6 +724,7 @@ test('renderWorkerRows: Review Managerのジョブを監視用の子行として
   const lines = workerStatus.renderWorkerRows([{
     role: 'review-manager',
     agentId: 'codex',
+    status: 'running',
     running: true,
     durationKnown: true,
     elapsedSeconds: 300,
@@ -799,11 +807,59 @@ test('main: list --json は機械可読な JSON 配列を出力する', () => {
       workerName: 'worker-a',
       pid: 111,
       running: true,
+      status: 'running',
       startTime: '2026-08-26T11:50:00.000Z',
       elapsedSeconds: 600,
     });
   } finally {
     workerStatus._setNow(null);
+    setTestWorkerPredicate(null);
+    setTestReadStartTime(null);
+    removeWorkspace(workspace);
+  }
+});
+
+test('list --issue: 履歴上の異常終了をJSONと非カラー表示に含め、開始記録だけではrunningにしない', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-issue-history-');
+  const base = Date.parse('2026-10-01T00:00:00.000Z');
+  const events = [
+    { schemaVersion: 1, issue: 501, event: 'worker-started', at: new Date(base).toISOString(), workerName: 'issue-501-review-manager-pr-33', role: 'review-manager', pid: 330, startTime: new Date(base).toISOString(), pr: 33 },
+    { schemaVersion: 1, issue: 501, event: 'worker-stopped', at: new Date(base + 1000).toISOString(), workerName: 'issue-501-review-manager-pr-33', pid: 330, exitCode: 1, abnormal: true, pr: 33 },
+    { schemaVersion: 1, issue: 501, event: 'worker-started', at: new Date(base + 2000).toISOString(), workerName: 'issue-501-coder-clean-stop', role: 'coder', pid: 331, startTime: new Date(base + 2000).toISOString() },
+    { schemaVersion: 1, issue: 501, event: 'worker-stopped', at: new Date(base + 3000).toISOString(), workerName: 'issue-501-coder-clean-stop', pid: 331, exitCode: 0, abnormal: false },
+    { schemaVersion: 1, issue: 502, event: 'worker-started', at: new Date(base + 4000).toISOString(), workerName: 'issue-502-coder-no-exit', role: 'coder', pid: 502, startTime: new Date(base + 4000).toISOString() },
+  ];
+  workerStatus._setReadCycleEvents((_ws, issue) => events.filter(event => String(event.issue) === String(issue)));
+  setTestWorkerPredicate(({ pid }) => pid === 111);
+  setTestReadStartTime((pid, expected) => pid === 111 ? expected : null);
+
+  try {
+    writeWorkers(workspace, {
+      'issue-501-coder-active': { pid: 111, startTime: '2026-10-01T00:01:00.000Z', issue: 501, agentId: 'codex' },
+    });
+    const json = runMain(['list', '--workspace', workspace, '--issue', '501', '--json']);
+    assert.equal(json.code, 0);
+    const rows = JSON.parse(json.lines.join('\n'));
+    assert.deepEqual(Object.fromEntries(rows.map(row => [row.workerName, row.status])), {
+      'issue-501-review-manager-pr-33': 'abnormal',
+      'issue-501-coder-clean-stop': 'stopped',
+      'issue-501-coder-active': 'running',
+    });
+    assert.ok(rows.find(row => row.workerName.includes('review-manager')).running === false);
+
+    const text = runMain(['list', '--workspace', workspace, '--issue', '501']);
+    for (const [pid, status] of Object.entries({ 330: 'abnormal', 331: 'stopped', 111: 'running' })) {
+      const row = text.lines.find(line => line.includes(`pid: ${pid}`));
+      assert.ok(row, `contains pid ${pid}: ${text.lines.join(' | ')}`);
+      assert.ok(row.includes(`[${status}]`), `pid ${pid} has text status ${status}`);
+    }
+
+    const noIssueMatch = runMain(['list', '--workspace', workspace, '--issue', '503', '--json']);
+    assert.deepEqual(JSON.parse(noIssueMatch.lines.join('\n')), []);
+    const startOnly = runMain(['list', '--workspace', workspace, '--issue', '502', '--json']);
+    assert.equal(JSON.parse(startOnly.lines.join('\n'))[0].status, 'stopped');
+  } finally {
+    workerStatus._setReadCycleEvents(null);
     setTestWorkerPredicate(null);
     setTestReadStartTime(null);
     removeWorkspace(workspace);
@@ -1385,6 +1441,10 @@ test('main: list --json と watch は同じ収集結果のワーカー集合・�
   const fixedNow = new Date('2026-08-26T03:15:30.000Z').getTime();
   workerStatus._setNow(() => fixedNow);
   setTestWorkerPredicate(() => false);
+  workerStatus._setReadCycleEvents((_workspace, issue) => (String(issue) === '467' ? [
+    { schemaVersion: 1, issue: 467, event: 'worker-started', at: '2026-08-26T03:00:00.000Z', workerName: 'issue-467-stopped-worker', role: 'coder', pid: 999, startTime: '2026-08-26T03:00:00.000Z' },
+    { schemaVersion: 1, issue: 467, event: 'worker-stopped', at: '2026-08-26T03:01:00.000Z', workerName: 'issue-467-stopped-worker', pid: 999, exitCode: 1, abnormal: true },
+  ] : []));
 
   try {
     writeWorkers(workspace, {
@@ -1394,18 +1454,20 @@ test('main: list --json と watch は同じ収集結果のワーカー集合・�
     const listResult = runMain(['list', '--workspace', workspace, '--json']);
     assert.equal(listResult.code, 0);
     const listed = JSON.parse(listResult.lines.join('\n'));
-    assert.deepEqual(listed.map(worker => ({ workerName: worker.workerName, running: worker.running })), [
-      { workerName: 'issue-467-stopped-worker', running: false },
+    assert.deepEqual(listed.map(worker => ({ workerName: worker.workerName, running: worker.running, status: worker.status })), [
+      { workerName: 'issue-467-stopped-worker', running: false, status: 'abnormal' },
     ]);
 
     const watchResult = runMain(['watch', '--workspace', workspace, '--interval', '5']);
     assert.equal(watchResult.code, 0);
     const workerLines = watchResult.lines.slice(1);
     assert.equal(workerLines.length, 1);
-    assert.ok(workerLines[0].includes('stopped-worker'));
+    assert.ok(workerLines[0].includes('(pid: 999)'));
+    assert.ok(workerLines[0].includes('[abnormal]'));
     assert.ok(workerLines[0].includes('999'));
   } finally {
     workerStatus._setNow(null);
+    workerStatus._setReadCycleEvents(null);
     setTestWorkerPredicate(null);
     removeWorkspace(workspace);
   }
@@ -2173,6 +2235,7 @@ test('main: list および list --json で Review Manager を表示する', () =
       workerName: 'issue-100-worker-a',
       pid: 111,
       running: true,
+      status: 'running',
       startTime: '2026-08-26T11:50:00.000Z',
       elapsedSeconds: 600,
     });
@@ -2180,6 +2243,7 @@ test('main: list および list --json で Review Manager を表示する', () =
       workerName: 'review-manager-pr-405',
       pid: 222,
       running: true,
+      status: 'running',
       startTime: '2026-08-26T11:55:00.000Z',
       elapsedSeconds: 300,
     });
@@ -2313,6 +2377,7 @@ test('collectWorkersStatus & main: list / --json でレビュージョブを収�
       leafIds: ['leaf-1'],
       pid: 333,
       running: true,
+      status: 'running',
       startTime: '2026-08-26T11:57:00.000Z',
       elapsedSeconds: 180,
       agentId: 'codex',

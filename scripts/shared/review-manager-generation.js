@@ -7,7 +7,7 @@ const fs = require('fs');
 const { atomicWriteJson } = require('./atomic-write');
 const { reviewArtifactPath } = require('./review-manager-paths');
 
-const RESULT_STATES = new Set(['running', 'complete', 'incomplete']);
+const RESULT_STATES = new Set(['running', 'complete', 'incomplete', 'failed']);
 
 function validateRecord(value, filePath) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -52,7 +52,7 @@ function beginReviewManagerGeneration(workspace, pr, startTime) {
 }
 
 function recordReviewManagerResult(workspace, pr, startTime, state) {
-  if (state !== 'complete' && state !== 'incomplete') {
+  if (state !== 'complete' && state !== 'incomplete' && state !== 'failed') {
     throw new Error(`Review Manager の結果状態が不正です: ${state}`);
   }
   const current = readReviewManagerGeneration(workspace, pr);
@@ -61,6 +61,7 @@ function recordReviewManagerResult(workspace, pr, startTime, state) {
   }
   if (current.state === state) return current;
   if (current.state !== 'running') {
+    if (state === 'failed') return current;
     throw new Error(`Review Manager 世代記録は既に結果状態です: ${current.state}`);
   }
   const record = { ...current, state };

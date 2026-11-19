@@ -28,6 +28,8 @@ const {
 
 const SKILL_MD = 'C:\\canonical\\skills\\gh-maestro-reviewer\\SKILL.md';
 const { reviewArtifactPath } = require('../../scripts/shared/review-manager-paths');
+const reviewCheckpoint = require('../../scripts/shared/review-checkpoint');
+const { readReviewManagerGeneration } = require('../../scripts/shared/review-manager-generation');
 const { reviewManagerStartingPath } = require('../../scripts/shared/running-review-managers');
 const { spawnSync } = require('child_process');
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'run-review-manager.js');
@@ -108,6 +110,28 @@ test('サブプロセス経由: 位置引数が不足しているとUsageエラ�
   const r = spawnSync(process.execPath, [SCRIPT, '5', 'o/r'], { encoding: 'utf8' });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /Usage/);
+});
+
+test('CLI: Review Manager setup失敗後にgenerationと保留チェックポイントをfailedで終端する', () => {
+  const testDir = path.join(tmpBase, 'cli-failure-finalization');
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const startTime = '2026-08-02T10:00:00.000Z';
+  reviewCheckpoint.begin(testDir, '999');
+
+  const result = spawnSync(process.execPath, [SCRIPT, '999', 'o/r', testDir, '715'], {
+    encoding: 'utf8',
+    timeout: 15000,
+    env: { ...process.env, GH_MAESTRO_REVIEW_MANAGER_START_TIME: startTime },
+  });
+
+  assert.equal(result.status, 1, result.error?.message || `${result.stdout || ''}\n${result.stderr || ''}`);
+  assert.deepEqual(readReviewManagerGeneration(testDir, '999'), {
+    version: 1, startTime, state: 'failed',
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ghDir, 'records', 'pr', '999', 'review', 'runs', 'latest.json'), 'utf8')), {
+    version: 1, failed: true,
+  });
 });
 
 // ── setupReviewWorktree / teardownReviewWorktree の node_modules 取り扱い ─────

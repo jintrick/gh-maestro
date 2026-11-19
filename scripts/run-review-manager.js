@@ -1220,7 +1220,7 @@ async function superviseReviewManager({
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.writeFileSync(manifestPath, JSON.stringify(prior.state.manifest, null, 2));
   } else {
-    try { checkpoint.begin(workspace, pr); } catch (error) {
+    try { checkpoint.begin(workspace, pr, validateManifest); } catch (error) {
       return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
     }
     const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath, priorFindingsFile });
@@ -1231,14 +1231,14 @@ async function superviseReviewManager({
     if (phase1.outcome !== 'target') return mapAgentPhaseFailure(phase1, reviewWtDir);
     let manifest;
     try { manifest = readJsonFile(manifestPath); } catch (error) {
-      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: `${manifestPath}: ${error.message}` };
+      return { outcome: 'setup-failed', exitCode: 1, agentPid: phase1.agentPid, agentRef: phase1.agentRef, reviewWtDir, reason: `${manifestPath}: ${error.message}` };
     }
     const validation = validateManifest(manifest);
     if (!validation.valid || !Array.isArray(manifest.jobs) || String(manifest.pr) !== String(pr) || manifest.repo !== repo || manifest.headRefOid !== head) {
-      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: `manifest 不正またはPR/HEAD不一致: ${manifestPath}: ${validation.errors.join('; ')}` }; 
+      return { outcome: 'setup-failed', exitCode: 1, agentPid: phase1.agentPid, agentRef: phase1.agentRef, reviewWtDir, reason: `manifest 不正またはPR/HEAD不一致: ${manifestPath}: ${validation.errors.join('; ')}` };
     }
     try { prior = checkpoint.create(workspace, pr, manifest, validateManifest); } catch (error) {
-      return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
+      return { outcome: 'setup-failed', exitCode: 1, agentPid: phase1.agentPid, agentRef: phase1.agentRef, reviewWtDir, reason: error.message };
     }
   }
   log(`review checkpoint: ${prior.file}`);
@@ -1481,9 +1481,24 @@ if (require.main === module) {
       });
     } catch (e) {
       log(`fatal error: ${e.message}`);
-      supervisionResult = { outcome: 'setup-failed', exitCode: 1, artifact: null, reason: e.message };
+      supervisionResult = { ...supervisionResult, outcome: 'setup-failed', exitCode: 1, artifact: null, reason: e.message };
     } finally {
       // 監督結果・cleanup結果をログに記録
+      const exitCode = supervisionResult && Number.isInteger(supervisionResult.exitCode)
+        ? supervisionResult.exitCode
+        : 1;
+      if (exitCode !== 0) {
+        try {
+          recordReviewManagerResult(workspace, pr, reviewManagerStartTime, 'failed');
+        } catch (error) {
+          log(`Review Manager失敗世代の記録に失敗しました: ${error.message}`);
+        }
+        try {
+          checkpoint.failPending(workspace, pr);
+        } catch (error) {
+          log(`review checkpoint失敗終端の記録に失敗しました: ${error.message}`);
+        }
+      }
       if (supervisionResult) {
         log(`final outcome: ${supervisionResult.outcome} exitCode=${supervisionResult.exitCode}`);
       }
@@ -1493,9 +1508,6 @@ if (require.main === module) {
         }
       }
       try {
-        const exitCode = supervisionResult && Number.isInteger(supervisionResult.exitCode)
-          ? supervisionResult.exitCode
-          : 1;
         _recordCycleEvent(workspace, issue, 'worker-stopped', {
           workerName: reviewManagerWorkerName,
           role: 'review-manager',

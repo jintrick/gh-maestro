@@ -39,14 +39,14 @@ Usage:
 
 Commands:
   status                 指定ワーカーの生死状態をJSONで照会する
-  list                   見出しとワーカーの稼働状況を表示する
+  list                   状態付きワーカー行を表示する。--issue指定時は終了済み記録も含める
   watch                  見出しとワーカー行を画面クリアしながら定期更新する
   pane                   WezTermスプリットペインを下部に開き、watchモードを常駐表示する（既存ペインがあれば再利用）
   close-pane             開いているWezTerm監視ペインを終了する（--issue指定時は対象を検証）
 
 Options:
   --workspace <path>     ワークスペースパス（必須）
-  --issue <N>            表示対象Issue（省略時はworkers.jsonから推測）
+  --issue <N>            表示対象Issue（省略時は全登録ワーカーとそのIssue記録を表示）
   --worker-name <name>   照会するワーカー名（status で必須）
   --json                 list で機械可読な JSON 配列を出力する
   --interval <sec>       watch / pane の更新間隔（秒、既定: 3）
@@ -58,15 +58,15 @@ Output (stdout):
   status:
     {"workerName":...,"running":true|false,"pid":...}
   list:
-    見出しとワーカー行、または --json 指定時は [{"workerName":...,"pid":...,"running":...,"startTime":...,"elapsedSeconds":...}]
+    見出しと状態付きワーカー行、または --json 指定時は status が running / abnormal / stopped の配列
   pane:
     STATUS_PANE_LAUNCHED: pane=<paneId>
   close-pane:
     STATUS_PANE_CLOSED: pane=<paneId>
 
 Description:
-  workers.json を読み取り、見出しとワーカーの稼働状況を表示する。
-  --json は既存のworkers.json由来の配列契約を維持する。
+  生存確認済みの workers.json と Issue の開発サイクル記録を照合し、状態付き一覧を表示する。
+  --json は既存フィールドを維持し、running / abnormal / stopped の status を追加する。
   pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。
   既存ペインが生存している場合は新しく作らず既存ペインを再利用する。記録socketの消滅を
   確実に判定でき、現在のWezTerm接続先と基準ペインが有効な場合は現在環境へrebindして記録を更新する。
@@ -400,7 +400,7 @@ function collectWorkersStatus(workspace, opts = {}) {
       running: true,
       startTime,
       elapsedSeconds,
-      issue: null,
+      issue: manager.issue ?? null,
       pr: prNum,
       agentId: reviewerAgentId,
     };
@@ -771,6 +771,7 @@ function mergeCycleWorkers(projectedWorkers, currentWorkers) {
       elapsedSeconds: durationKnown ? totalElapsed : null,
       durationKnown,
     };
+    merged.status = workerStatusKind(merged);
     if (Array.isArray(current?.jobs)) merged.jobs = current.jobs.map(job => ({ ...job }));
     if (current?.jobsError) merged.jobsError = true;
     return merged;
@@ -785,9 +786,9 @@ function workerStatusKind(worker) {
 
 function renderWorkerRows(workers, opts = {}) {
   const input = Array.isArray(workers) ? workers : [];
+  const statusOrder = { running: 0, abnormal: 1, stopped: 2 };
   const sorted = input.slice().sort((a, b) => {
-    if (Boolean(a.running) !== Boolean(b.running)) return a.running ? -1 : 1;
-    if (Boolean(a.abnormal) !== Boolean(b.abnormal)) return a.abnormal ? -1 : 1;
+    if (a.status !== b.status) return statusOrder[a.status] - statusOrder[b.status];
     return String(a.startTime || '').localeCompare(String(b.startTime || ''));
   });
   const prepared = sorted.map(worker => ({ worker, role: roleFromWorker(worker) }));
@@ -797,7 +798,7 @@ function renderWorkerRows(workers, opts = {}) {
   const colorize = Boolean(opts.colorize);
   const entries = [];
   for (const [visibleIndex, { worker, role }] of visible.entries()) {
-    const statusKind = workerStatusKind(worker);
+    const statusKind = worker.status;
     const dot = statusKind === 'abnormal'
       ? colorizeText('■', 31, colorize)
       : statusKind === 'running'
@@ -816,7 +817,7 @@ function renderWorkerRows(workers, opts = {}) {
       issueCol: '',
       shortName: `${role}${runSuffix}`,
       agentCol: agent,
-      statusCol: '',
+      statusCol: `[${statusKind}]`,
       timeCol: elapsed,
       bar: '',
       pidStr: `(pid: ${pid})`,
@@ -862,7 +863,7 @@ function renderWorkerRows(workers, opts = {}) {
       continue;
     }
     const row = alignedRows[alignedIndex++];
-    lines.push(`${row.prefix}${row.namePart} [${row.agentPart}] ${row.timePart} ${row.pidStr}${row.hiddenSuffix}`.trimEnd());
+    lines.push(`${row.prefix}${row.namePart} [${row.agentPart}] ${row.statusPart} ${row.timePart} ${row.pidStr}${row.hiddenSuffix}`.trimEnd());
   }
   return lines;
 }
@@ -890,21 +891,35 @@ function buildStatusHeader(repo, issue, pr) {
   return `${repoText} issue#${issueText}${prText}`;
 }
 
-function renderSnapshotLines(workspace, issue, opts = {}) {
+function collectWorkerStatusSnapshot(workspace, issue, opts = {}) {
   const currentWorkers = opts.currentWorkers || collectWorkersStatus(workspace, opts.collectOpts || opts);
-  const explicitIssue = issue != null && String(issue) !== '';
-  const selectedIssue = explicitIssue ? String(issue) : inferIssue(currentWorkers);
-  const events = selectedIssue
-    ? (opts.cycleEvents || _readCycleEvents(workspace, selectedIssue))
-    : [];
-
+  const selectedIssue = issue != null && String(issue) !== '' ? String(issue) : null;
+  const eventIssues = selectedIssue
+    ? [selectedIssue]
+    : [...new Set(currentWorkers.map(worker => worker.issue).filter(value => value != null).map(String))];
+  const events = opts.cycleEvents || eventIssues.flatMap(issueNumber => _readCycleEvents(workspace, issueNumber));
   const projected = projectCycleMetrics(events, {
-    issue: selectedIssue || null,
+    issue: selectedIssue,
     now: opts.now == null ? _now() : opts.now,
   });
-  const workers = mergeCycleWorkers(projected.workers, currentWorkers.filter(worker => (
-    selectedIssue == null || worker.issue == null || String(worker.issue) === selectedIssue
-  )));
+  const scopedCurrent = selectedIssue
+    ? currentWorkers.filter(worker => (
+      String(worker.issue ?? '') === selectedIssue
+      || projected.workers.some(projectedWorker => workerRunMatches(projectedWorker, worker))
+    ))
+    : currentWorkers;
+  const workers = mergeCycleWorkers(projected.workers, scopedCurrent);
+  return {
+    workers,
+    projected,
+    issue: selectedIssue || inferIssue(scopedCurrent),
+    currentWorkers: scopedCurrent,
+  };
+}
+
+function renderSnapshotLines(workspace, issue, opts = {}) {
+  const snapshot = opts.snapshot || collectWorkerStatusSnapshot(workspace, issue, opts);
+  const { workers, projected, issue: selectedIssue, currentWorkers } = snapshot;
   const repo = opts.repo !== undefined ? opts.repo : _getRepo(workspace, opts);
   const pr = projected.pr ?? currentWorkers.find(w => w.pr != null)?.pr ?? null;
   const header = buildStatusHeader(repo, selectedIssue, pr);
@@ -1045,20 +1060,24 @@ function main(argv = process.argv.slice(2)) {
   }
 
   if (sub === 'list') {
-    let workers;
+    let snapshot;
     try {
-      workers = collectWorkersStatus(workspace);
+      snapshot = collectWorkerStatusSnapshot(workspace, issueArg, {
+        currentWorkers: collectWorkersStatus(workspace),
+        now: _now(),
+      });
     } catch (e) {
       writeErr(`worker-status: list の照会に失敗しました: ${e.message}`);
       return { code: 1, lines: out, errLines: err };
     }
 
     if (values['--json']) {
-      const jsonEntries = workers.map(w => {
+      const jsonEntries = snapshot.workers.map(w => {
         const entry = {
           workerName: w.workerName,
           pid: w.pid,
           running: w.running,
+          status: w.status,
           startTime: w.startTime,
           elapsedSeconds: w.elapsedSeconds,
         };
@@ -1069,6 +1088,7 @@ function main(argv = process.argv.slice(2)) {
             leafIds: j.leafIds,
             pid: j.pid,
             running: j.running,
+            status: j.running ? 'running' : 'stopped',
             startTime: j.startTime,
             elapsedSeconds: j.elapsedSeconds,
             agentId: j.agentId,
@@ -1081,7 +1101,7 @@ function main(argv = process.argv.slice(2)) {
     } else {
       const repo = _getRepo(workspace);
       const lines = renderSnapshotLines(workspace, issueArg, {
-        currentWorkers: workers,
+        snapshot,
         now: _now(),
         maxLineWidth: process.stdout.columns,
         colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
@@ -1310,12 +1330,15 @@ function runWatchLoop(workspace, interval, opts = {}) {
 
   const render = () => {
     try {
-      const workers = collectWorkersStatus(workspace, collectOpts);
+      const snapshot = collectWorkerStatusSnapshot(workspace, opts.issue, {
+        ...collectOpts,
+        currentWorkers: collectWorkersStatus(workspace, collectOpts),
+        now: (opts.nowFn || _now)(),
+      });
       const lines = renderSnapshotLines(workspace, opts.issue, {
+        snapshot,
         ...opts,
-        currentWorkers: workers,
         collectOpts,
-        now: _now(),
         maxLineWidth: opts.maxLineWidth ?? outStream.columns,
         colorize: opts.colorize !== undefined
           ? Boolean(opts.colorize)
@@ -1368,6 +1391,7 @@ module.exports = {
   renderUptimeBars,
   renderCycleLine,
   renderWorkerRows,
+  collectWorkerStatusSnapshot,
   workerStatusKind,
   renderSnapshotLines,
   buildStatusHeader,

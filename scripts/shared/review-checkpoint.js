@@ -68,7 +68,9 @@ function load(workspace, pr, validateManifest) {
   const pointer = path.join(root(workspace, pr), 'latest.json');
   const value = readOptional(pointer);
   if (value === null) return null;
-  if (value && value.version === 1 && value.pending === true && Object.keys(value).length === 2) return null;
+  if (value && value.version === 1
+    && (value.pending === true || value.failed === true)
+    && Object.keys(value).length === 2) return null;
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
       typeof value.id !== 'string' || !/^[a-f0-9]{32}$/.test(value.id)) {
     throw new Error(`review checkpoint 参照の形式が不正です: ${pointer}`);
@@ -86,10 +88,20 @@ function select(workspace, pr, repo, head, validateManifest) {
   }
   return prior.state.manifest.headRefOid === head ? prior : null;
 }
-function begin(workspace, pr) {
+function begin(workspace, pr, validateManifest) {
   const dir = root(workspace, pr);
   fs.mkdirSync(dir, { recursive: true });
+  if (typeof validateManifest === 'function' && load(workspace, pr, validateManifest)) return false;
   atomicWriteJson(path.join(dir, 'latest.json'), { version: 1, pending: true });
+  return true;
+}
+function failPending(workspace, pr) {
+  const pointer = path.join(root(workspace, pr), 'latest.json');
+  const value = readOptional(pointer);
+  if (value && value.version === 1 && value.failed === true && Object.keys(value).length === 2) return true;
+  if (!value || value.version !== 1 || value.pending !== true || Object.keys(value).length !== 2) return false;
+  atomicWriteJson(pointer, { version: 1, failed: true });
+  return true;
 }
 function create(workspace, pr, manifest, validateManifest) {
   const id = crypto.randomBytes(16).toString('hex');
@@ -110,4 +122,4 @@ function read(workspace, pr, id, validateManifest) {
   if (state === null) throw new Error(`review checkpoint がありません: ${file}`);
   return { file, state: validate(state, file, validateManifest) };
 }
-module.exports = { load, select, begin, create, save, read, statePath, runnerLeasePath, inspectRunners };
+module.exports = { load, select, begin, failPending, create, save, read, statePath, runnerLeasePath, inspectRunners };

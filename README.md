@@ -156,12 +156,12 @@ scripts/                         # 全スクリプト（CLI・モジュール）
 ## worker の実行ログ
 
 worker は画面を持たないバックグラウンドプロセスとして動く。標準出力/標準エラーは実行中から逐次
-`<workspace>/.gh-maestro/worker-logs/<workerName>.log` へ書き込まれる（1ワーカー1ファイル、初回起動もresumeも同じファイルに追記）。
+`<workspace>/.gh-maestro/records/issue/<N>/workers/<workerName>/worker.log` へ書き込まれる（1ワーカー1ファイル、初回起動もresumeも同じファイルに追記）。
 
 worker の報告は Issue コメントとして届くため、通常このログを読む必要はない。異常終了の切り分けや、
 実行中の経過を追いたいときに参照する。
 
-Review Manager のログも同じ `<workspace>/.gh-maestro/worker-logs/review-manager-<PR>.log` にある。
+Review Manager のログは `<workspace>/.gh-maestro/records/pr/<PR>/workers/issue-<N>-review-manager-pr-<PR>/worker.log` にある。
 
 ## レビュー
  
@@ -335,4 +335,3 @@ gh-maestroが実際に細かい起動設定を必要とするのは claude / cod
   }
 }
 ```
-

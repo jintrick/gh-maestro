@@ -90,3 +90,24 @@ test('共有結果確認は同世代のincompleteとcomplete成果物だけを�
     });
   });
 });
+
+test('failed世代は未確認のまま残り、次の起動で新世代になり確定済み結果をfailedで上書きしない', () => {
+  withTempDir((workspace) => {
+    const firstStart = '2026-08-02T10:00:00.000Z';
+    const nextStart = '2026-08-03T10:00:00.000Z';
+    beginReviewManagerGeneration(workspace, '42', firstStart);
+    assert.deepEqual(recordReviewManagerResult(workspace, '42', firstStart, 'failed'), {
+      version: 1, startTime: firstStart, state: 'failed',
+    });
+    assert.deepEqual(inspectReviewManagerResult(workspace, '42', firstStart), {
+      status: 'unconfirmed', state: 'failed',
+    });
+
+    beginReviewManagerGeneration(workspace, '42', nextStart);
+    recordReviewManagerResult(workspace, '42', nextStart, 'complete');
+    assert.deepEqual(recordReviewManagerResult(workspace, '42', nextStart, 'failed'), {
+      version: 1, startTime: nextStart, state: 'complete',
+    });
+    assert.equal(readReviewManagerGeneration(workspace, '42').state, 'complete');
+  });
+});

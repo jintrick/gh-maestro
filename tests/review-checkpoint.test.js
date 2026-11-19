@@ -109,3 +109,22 @@ test('resume selects only the same PR, repository and HEAD, preserving older run
   assert.equal(checkpoint.select(ws, 11, 'o/r', 'abc', validateManifest), null);
   assert.ok(fs.existsSync(entry.file));
 });
+
+test('段階1の失敗終端は次の起動で再開されず、確定済みチェックポイントを保持する', () => {
+  const ws = scope.mkdtemp('rm-failed-checkpoint-');
+  try {
+    checkpoint.begin(ws, 11, validate);
+    assert.equal(checkpoint.failPending(ws, 11), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ws, '.gh-maestro', 'records', 'pr', '11', 'review', 'runs', 'latest.json'), 'utf8')), {
+      version: 1, failed: true,
+    });
+    assert.equal(checkpoint.load(ws, 11, validate), null);
+    assert.equal(checkpoint.select(ws, 11, manifest.repo, manifest.headRefOid, validate), null);
+
+    const confirmed = checkpoint.create(ws, 11, manifest, validate);
+    checkpoint.begin(ws, 11, validate);
+    assert.equal(checkpoint.load(ws, 11, validate).id, confirmed.id);
+    assert.equal(checkpoint.failPending(ws, 11), false);
+    assert.equal(checkpoint.load(ws, 11, validate).id, confirmed.id);
+  } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+});
