@@ -396,6 +396,21 @@ describe('completeReviewManagerStartup', () => {
     });
   });
 
+  test('failed世代は異常終了通知の再試行が完了するまで起動予約を保持する', () => {
+    withTempDir((workspace) => {
+      const startingPath = writeStartup(workspace);
+      fs.writeFileSync(reviewArtifactPath(workspace, '42', '.generation.json'), JSON.stringify({
+        version: 1, startTime, state: 'failed',
+      }), 'utf8');
+      const result = hook.completeReviewManagerStartup({
+        workspace, pr: '42', token: 'startup-token', startTime,
+        notificationResult: { status: 1, stderr: 'temporary GitHub failure' },
+      });
+      assert.equal(result.retained, true);
+      assert.equal(fs.existsSync(startingPath), true);
+    });
+  });
+
   test('異常終了通知の投稿成功後は起動予約を解放する', () => {
     withTempDir((workspace) => {
       const startingPath = writeStartup(workspace);

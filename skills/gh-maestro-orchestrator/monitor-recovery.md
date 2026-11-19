@@ -31,9 +31,11 @@ Review Managerを起動しない軽量経路では、上のコマンドへ `--no
 
 ### Review Manager停止通知
 
-`RESIDENT_NOTIFICATION` の `source` が `worker-supervisor` で、本文にReview ManagerとPR番号がある場合は停止検知の通知である。PR単位の `<workspace>/.gh-maestro/records/pr/<PR>/review/` 配下の `manager.running`、`manager.log`、`manager.json`、`manager.incomplete` を確認し、必要なら `worker-status.js list --workspace "$WORKSPACE"` で現在のReview Managerの生存状態を照合する。
+`RESIDENT_NOTIFICATION` の `source` が `worker-supervisor` で、本文にReview ManagerとPR番号がある場合は停止検知の通知である。PR単位の `<workspace>/.gh-maestro/records/pr/<PR>/review/` 配下にある `manager.running`、`manager.json`、`manager.incomplete`、`manager.generation.json` と `runs/latest.json` を確認する。Review Managerの実行ログは `<workspace>/.gh-maestro/records/pr/<PR>/workers/issue-<N>-review-manager-pr-<PR>/worker.log` にある。
 
-停止通知は、結果artifactと終了フックの `abnormal-exit` markerを確認できなかった停止を示す。`manager.json` または `manager.incomplete` があれば成果を確認し、`manager.log` で停止理由を調べる。原因と継続対象を確認できた場合だけ、上記の `start-review-manager.js --resume` を明示して再開する。通知を契機に自動再起動・プロセス停止・記録削除をしない。
+通知または状態ファイルの内容だけでReview Managerが稼働中と判断しない。`worker-status.js list --issue <N> --json --workspace "$WORKSPACE"` の該当PR行で `status` と `running` を確認し、worker.logの末尾にある終了結果・失敗原因と照合する。プロセスの生存確認が判定不能なら稼働・停止のどちらにも決めず、再開しない。失敗状態（`failed`）は成果の確定を意味しないため、異常終了通知の抑止には使わない。
+
+`manager.json` または `manager.incomplete` があれば成果を確認する。原因と継続対象を確認できた場合だけ、前節の `start-review-manager.js --resume` を明示して再開する。通知を契機に自動再起動・プロセス停止・記録削除をしない。
 
 本文が「状態を判定できません」と伝えている場合は、死亡と決めつけず、`manager.running` と必要なcycle metricsを保持して調査する。endpoint確認や記録の読み取りが不確かな間は再開しない。判定不能が解消せず人間の操作が必要な場合は、PR番号・確認できた状態・失敗理由を示して一つの対応を尋ねる。
 
@@ -72,16 +74,19 @@ node "{{SCRIPTS_PATH}}/worker-status.js" list --workspace $WORKSPACE
 node "{{SCRIPTS_PATH}}/worker-status.js" status --workspace $WORKSPACE --worker-name <name>
 ~~~
 
-listは全ワーカーを表示し、必要なら--jsonでJSON出力する。statusは単一ワーカーの生死を確認する。監視paneの手動開始・再作成が必要な場合だけ次を使い、終了にはclose-paneを使う。
+`list --json` は各ワーカーの `status` として `running`、`abnormal`、`stopped` を返す。`list --issue <N>` はIssueの記録も照合し、registryから消えた異常終了も含める。異常終了通知を受けたら、状態値や状態ファイルだけで稼働中と判断せず、該当worker.log末尾とJSONの `running` を確認する。通常ワーカーのログは `$WORKSPACE/.gh-maestro/records/issue/<N>/workers/<workerName>/worker.log`、Review Managerのログは `$WORKSPACE/.gh-maestro/records/pr/<PR>/workers/issue-<N>-review-manager-pr-<PR>/worker.log` にある。
+
+statusは単一ワーカーの生死を確認する。監視paneの手動開始・再作成が必要な場合だけ次を使い、終了にはclose-paneを使う。
 
 ~~~sh
 node "{{SCRIPTS_PATH}}/worker-status.js" pane --workspace $WORKSPACE
 node "{{SCRIPTS_PATH}}/worker-status.js" close-pane --workspace $WORKSPACE
 ~~~
 
-他のワーカーと比べて連続稼働時間が突出している場合や、タスク規模に対して不自然に長い場合は、worker log（$WORKSPACE/.gh-maestro/worker-logs/<workerName>.log）を読み、処理中か、暴走ループか、無応答かを切り分ける。ログは異常終了・配送断念・長時間無反応の生死確認が必要な場合にだけ読む。新規起動workerが報告せず終了してもログから代理投稿せず、短いresumeメッセージで本人に報告させる。
+他のワーカーと比べて連続稼働時間が突出している場合や、タスク規模に対して不自然に長い場合は、対象workerの記録パスにあるログを読み、処理中か、暴走ループか、無応答かを切り分ける。ログは異常終了・配送断念・長時間無反応の生死確認が必要な場合にだけ読む。新規起動workerが報告せず終了してもログから代理投稿せず、短いresumeメッセージで本人に報告させる。
 
 暴走やハングと判断した場合はstop-worker.jsでプロセスを停止する。閾値による機械的な自動停止は行わず、停止・再開はorchestratorが判断する。人間の判断が必要な場合だけ、対象workerの作業・状態・選択肢を示して尋ねる。報告後にプロセスだけが残った居座りもstop-worker.jsを使う。remove-worker.jsはworktree・branch・登録も消すため、再開可能な停止に使わない。
+
 ## 監視ペイン
 
 `status-pane` はplugin monitorとは別のWezTerm設備である。install後の常駐更新が監視ペインを別workspaceから奪わない契約は維持する。必要時だけ次を実行し、失敗した場合はregistryを確認する。監視paneの状態が人間の判断を妨げるときに限り、対象状態と必要な対応を示して尋ねる。

@@ -90,8 +90,11 @@ test('Review Manager停止・判定不能のresident通知は復旧手順へ案�
 
   assert.match(eventTable, /RESIDENT_NOTIFICATION（source=worker-supervisor、Review Manager停止・PR番号あり）/);
   assert.match(eventTable, /RESIDENT_NOTIFICATION（source=worker-supervisor、Review Managerの状態判定不能）/);
-  assert.match(recovery, /manager\.running.*manager\.log.*manager\.json.*manager\.incomplete/);
-  assert.match(recovery, /worker-status\.js list/);
+  assert.match(recovery, /manager\.running.*manager\.json.*manager\.incomplete.*manager\.generation\.json/);
+  assert.match(recovery, /records\/pr\/<PR>\/workers\/issue-<N>-review-manager-pr-<PR>\/worker\.log/);
+  assert.match(recovery, /worker-status\.js list --issue <N> --json/);
+  assert.match(recovery, /失敗状態.*異常終了通知の抑止には使わない/);
+  assert.doesNotMatch(recovery, /\.gh-maestro\/worker-logs|manager\.log/);
   assert.match(recovery, /start-review-manager\.js" --resume/);
   assert.match(recovery, /状態を判定できません[\s\S]*不確かな間は再開しない/);
 });

@@ -234,10 +234,10 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 | PLAN_REPORTED:<issue>:<planCommentId> | 計画URL報告のcarrierコメントは既読化済み。`msg-read.js --plan --issue <issue> --workspace $WORKSPACE` でpin済み計画を読む。 | 工程5。NEW_MESSAGEは重ねて出力されない。 |
 | NEW_MESSAGE:<issue>:<commentId> | `msg-read.js <commentId> --workspace $WORKSPACE` で本文を読む。plan-report以外の報告・障害を本文から判定する。 | 該当工程、PR/Review Manager通知、または障害対応。 |
 | msg-poll未初期化・旧形式(v1) | `reset-session.js --workspace $WORKSPACE` で初期化して受信を再開する。 | 横断手続き「セッションの受信monitorとInbox Supervisor」 |
-| worker起動失敗・異常終了、または配送断念 | 未完了の作業を復旧手順に渡す。必要時だけworker logを確認し、人間の判断が必要な場合に限り、未完了作業と判断材料を示して尋ねる。 | monitor-recovery.mdまたは横断手続き「ワーカーの稼働監視」 |
+| worker起動失敗・異常終了、または配送断念 | 異常終了時は `worker-status.js list --issue <N> --json` で `status` と `running` を確認し、通常workerの `$WORKSPACE/.gh-maestro/records/issue/<N>/workers/<workerName>/worker.log` の末尾と照合する。状態表示や状態ファイルだけで稼働中と判断しない。 | monitor-recovery.mdまたは横断手続き「ワーカーの稼働監視」 |
 | 自動代理送信マーカー | msg-send.jsの呼び忘れとして本文を通常どおり評価する。 | 該当工程 |
 | 報告後のプロセス残留 | `stop-worker.js`でプロセスだけを止め、成果を保持する。 | 横断手続き「ワーカーの停止と削除」 |
-| ハング通知・不審な長時間稼働 | worker logと状態を確認し、ハング時はmonitor-recovery.mdに従う。人間の判断が必要な場合だけ、対象作業と選択肢を示して尋ねる。 | 横断手続き「ワーカーの稼働監視」とmonitor-recovery.md |
+| ハング通知・不審な長時間稼働 | worker-statusのJSONにある `running` と実ログ末尾を照合し、ハング時はmonitor-recovery.mdに従う。人間の判断が必要な場合だけ、対象作業と選択肢を示して尋ねる。 | 横断手続き「ワーカーの稼働監視」とmonitor-recovery.md |
 | workerプロセス停止検知 | 成果待ちでなければ何もしない。待っていた場合は30秒後に報告を再確認し、無ければ該当工程の復旧手順へ進む。 | 該当工程 |
 | 新規起動workerが報告なしで終了 | logを読んで代理投稿せず、短いresumeで本人に報告させる。 | 該当工程 |
 | Inbox/PR monitor停止・通知欠落 | sessionとregistryを確認してmonitor-recovery.mdに従う。人間の対応が必要な場合だけ、停止している通知経路と必要な操作を示して尋ねる。plugin管理monitorを重複起動しない。 | monitor-recovery.md |
@@ -247,7 +247,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 | REVIEW_MANAGER_STARTED / REVIEW_MANAGER_ALREADY_RUNNING / REVIEW_MANAGER_ALREADY_CLAIMED | 起動・稼働・claim済みを記録する。必要時はmonitor-recovery.mdを確認する。 | 工程7-[1/6] |
 | RESIDENT_NOTIFICATION（source=worker-supervisor、Review Manager停止・PR番号あり） | JSONのsourceとbodyを読み、PRのReview Manager停止通知としてmonitor-recovery.mdの確認手順へ進む。成果と停止理由を確認し、再起動は自動で行わない。 | 工程7-[2/6] |
 | RESIDENT_NOTIFICATION（source=worker-supervisor、Review Managerの状態判定不能） | PR番号と判定不能の理由を保持し、manager.runningと関連記録を削除・修復せずmonitor-recovery.mdに従う。判定できない間は再開しない。 | 工程7-[2/6] |
-| Review Manager異常終了のNEW_MESSAGE（fromがissue-<N>-review-manager-pr-<PR>） | worker logで原因を確認し、原因解消後にReview Managerだけ復旧する。復旧を進めるために人間の判断が必要な場合だけ、その判断に要る状況を示して尋ねる。 | 工程7-[2/6] |
+| Review Manager異常終了のNEW_MESSAGE（fromがissue-<N>-review-manager-pr-<PR>） | `worker-status.js list --issue <N> --json` の該当PR行で `status` と `running` を確認し、`$WORKSPACE/.gh-maestro/records/pr/<PR>/workers/issue-<N>-review-manager-pr-<PR>/worker.log` の末尾と照合する。状態ファイルだけで稼働中と判断せず、失敗状態を通知抑止の根拠にしない。 | 工程7-[2/6] |
 | SLOW_TEST_STARTED / SLOW_TEST_ALREADY_RECORDED / SLOW_TEST_RESULT | PR/HEAD/layerを照合し、状態・件数・ログ識別子を記録する。unavailableや申告更新失敗を再試行・診断しない。軽量PRでは発生しない。 | 工程7-[1/6] |
 | REVIEW_COMMENT / PR_REVIEW | 投稿者と本文を保持する。APPROVEDはマージ許可シグナル、CHANGES_REQUESTEDは指摘、COMMENTEDはPR_COMMENT同様に扱う。Review Managerのレビュー（本文が `Review Manager completed.` で始まるもの）の指摘は、通知本文ではなく `node "{{SCRIPTS_PATH}}/read-review-findings.js" --pr <PR> --workspace $WORKSPACE` の全文を入力にしてトリアージする（終了コード2・3は「指摘なし」ではない。ADR 0059）。 | triage.mdと工程7-[3/6]。 |
 | PR_COMMENT | 投稿者と本文を保持する。テスト結果申告など、正式レビューではないコメントではtriage.mdを追加しない。 | 工程7-[1/6]。 |
@@ -351,7 +351,7 @@ msg-send.jsの追加指示はworker-supervisor.jsが配送する。作業中で�
 
 #### ワーカーの稼働監視
 
-ヘッドレスworkerの暴走・ハングを早期発見するWezTerm監視paneは自動更新され、spawn-worker.js登録後とmsg-send.js投稿成功後に存在保証が試みられる。通常時に手動起動しない。list/statusはワンショット照会であり起動トリガーではない。復旧時の接続先・再作成・終了手順はmonitor-recovery.md「監視ペイン」に従う。長時間稼働やログの確認、停止判断はイベント表とmonitor-recovery.md「ワーカー状態監視と異常対応」に従い、閾値で自動停止しない。
+ヘッドレスworkerの暴走・ハングを早期発見するWezTerm監視paneは自動更新され、spawn-worker.js登録後とmsg-send.js投稿成功後に存在保証が試みられる。通常時に手動起動しない。list/statusはワンショット照会であり起動トリガーではない。復旧時の接続先・再作成・終了手順はmonitor-recovery.md「監視ペイン」に従う。状態の正本はlistのJSONが返す `running`・`abnormal`・`stopped` であり、list表示とwatch表示は同じ状態情報を整形する。Issueを指定するとregistryから消えた異常終了も照会できる。異常終了時はworker log末尾とJSONの `running` を確認し、状態表示や状態ファイルだけから稼働中と判断しない。通常workerのログは `$WORKSPACE/.gh-maestro/records/issue/<N>/workers/<workerName>/worker.log`、Review Managerのログは `$WORKSPACE/.gh-maestro/records/pr/<PR>/workers/issue-<N>-review-manager-pr-<PR>/worker.log` にある。長時間稼働やログの確認、停止判断はイベント表とmonitor-recovery.md「ワーカー状態監視と異常対応」に従い、閾値で自動停止しない。
 
 #### CLI参照とIssueアンカー
 

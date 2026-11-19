@@ -490,6 +490,31 @@ describe('Review Manager stop monitoring', () => {
     });
   });
 
+  test('failed世代はmanager.runningの停止通知を抑止しない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    const notifications = [];
+    supervisor._setNotifyOrchestrator((params) => {
+      notifications.push(params);
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    withTempDir((dir) => {
+      setupWorkspace(dir);
+      writeReviewManagerRecord(dir, { pr: '42' });
+      writeReviewManagerGeneration(dir, { state: 'failed' });
+
+      const scan = runMain(['--once', '--workspace', dir]);
+      assert.equal(scan.code, 0, scan.errLines.join('\n'));
+      scan.runOnce();
+
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].issue, '715');
+      assert.match(notifications[0].body, /PR #42/);
+      assert.ok(scan.lines.includes('REVIEW_MANAGER_STOP_DETECTED:42:4200'));
+    });
+  });
+
   test('前回のmanager.jsonは今回のmanager.runningの停止通知を抑止しない', () => {
     supervisor._setGhRepoView(mockGhRepoView('test/repo'));
     supervisor._setGhApiComments(mockGhApiComments([]));

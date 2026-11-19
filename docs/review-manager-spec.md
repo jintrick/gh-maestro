@@ -109,7 +109,7 @@ PR の差分を読み、8つの葉それぞれを「今回は見る／見ない�
 └── manager.retries.json   やり直した回数
 ```
 
-ワーカーの実行ログは `<ワークスペース>/.gh-maestro/worker-logs/` にある。
+Review Managerの実行ログは `<ワークスペース>/.gh-maestro/records/pr/<PR>/workers/issue-<N>-review-manager-pr-<PR>/worker.log` にある。
 
 トークン消費量はここには記録されない。レビュアーは Codex で動いており、消費量は `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl` に自動記録される。
 

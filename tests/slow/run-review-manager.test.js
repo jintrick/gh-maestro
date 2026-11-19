@@ -28,8 +28,12 @@ const {
 
 const SKILL_MD = 'C:\\canonical\\skills\\gh-maestro-reviewer\\SKILL.md';
 const { reviewArtifactPath } = require('../../scripts/shared/review-manager-paths');
+const reviewCheckpoint = require('../../scripts/shared/review-checkpoint');
+const { readReviewManagerGeneration } = require('../../scripts/shared/review-manager-generation');
 const { reviewManagerStartingPath } = require('../../scripts/shared/running-review-managers');
 const { spawnSync } = require('child_process');
+const { cleanSpawnEnv } = require('../_spawn-env');
+const { resolveSkillMdPath } = require('../../scripts/shared/skill-install-path');
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'run-review-manager.js');
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-run-rm-' + Date.now());
@@ -108,6 +112,28 @@ test('サブプロセス経由: 位置引数が不足しているとUsageエラ�
   const r = spawnSync(process.execPath, [SCRIPT, '5', 'o/r'], { encoding: 'utf8' });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /Usage/);
+});
+
+test('CLI: Review Manager setup失敗後にgenerationと保留チェックポイントをfailedで終端する', () => {
+  const testDir = path.join(tmpBase, 'cli-failure-finalization');
+  const ghDir = path.join(testDir, '.gh-maestro');
+  fs.mkdirSync(ghDir, { recursive: true });
+  const startTime = '2026-08-02T10:00:00.000Z';
+  reviewCheckpoint.begin(testDir, '999');
+
+  const result = spawnSync(process.execPath, [SCRIPT, '999', 'o/r', testDir, '715'], {
+    encoding: 'utf8',
+    timeout: 15000,
+    env: { ...process.env, GH_MAESTRO_REVIEW_MANAGER_START_TIME: startTime },
+  });
+
+  assert.equal(result.status, 1, result.error?.message || `${result.stdout || ''}\n${result.stderr || ''}`);
+  assert.deepEqual(readReviewManagerGeneration(testDir, '999'), {
+    version: 1, startTime, state: 'failed',
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ghDir, 'records', 'pr', '999', 'review', 'runs', 'latest.json'), 'utf8')), {
+    version: 1, failed: true,
+  });
 });
 
 // ── setupReviewWorktree / teardownReviewWorktree の node_modules 取り扱い ─────
@@ -287,6 +313,148 @@ function gitInitRepoWithCommit(dir) {
   assert.equal(git(['commit', '-m', 'init']).status, 0);
   return git;
 }
+
+test('superviseReviewManager: phase1 manifest validation failure stops the live agent before removing its worktree', async () => {
+  const testDir = path.join(tmpBase, 'phase1-manifest-cleanup');
+  const workspace = path.join(testDir, 'workspace');
+  const home = path.join(testDir, 'home');
+  const runtimeRoot = path.join(testDir, 'runtime');
+  const agentScript = path.join(testDir, 'fake-reviewer.js');
+  const agentPidFile = path.join(testDir, 'fake-reviewer.pid');
+  const pr = '715';
+  const worktreeDir = reviewWorktreeDir(workspace, pr);
+  const git = gitInitRepoWithCommit(workspace);
+  const workspaceConfig = path.join(workspace, '.gh-maestro', 'config.json');
+  fs.mkdirSync(path.dirname(workspaceConfig), { recursive: true });
+  fs.writeFileSync(workspaceConfig, JSON.stringify({ skillAgentMap: { 'gh-maestro-reviewer': 'codex' } }), 'utf8');
+  assert.equal(git(['add', '.gh-maestro/config.json']).status, 0);
+  assert.equal(git(['commit', '-m', 'configure isolated review agent']).status, 0);
+
+  const origin = path.join(testDir, 'origin.git');
+  assert.equal(spawnSync('git', ['init', '--bare', origin], { encoding: 'utf8' }).status, 0);
+  assert.equal(git(['remote', 'add', 'origin', origin]).status, 0);
+  assert.equal(git(['push', 'origin', `HEAD:refs/pull/${pr}/head`]).status, 0);
+
+  fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+    agents: {
+      codex: {
+        command: process.execPath,
+        extraArgs: [agentScript, '--print'],
+        nonInteractiveTokens: ['--print'],
+        promptDelivery: 'positional',
+      },
+    },
+  }), 'utf8');
+  fs.writeFileSync(agentScript, [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const instruction = process.argv.slice(2).find(arg => arg.startsWith('Read ') && arg.endsWith(' and execute it.'));",
+    "if (!instruction) throw new Error('prompt file instruction missing');",
+    "const promptPath = instruction.slice('Read '.length, -' and execute it.'.length);",
+    "const prompt = fs.readFileSync(promptPath, 'utf8');",
+    "const match = prompt.match(/^MANIFEST=(.+)$/m);",
+    "if (!match) throw new Error('manifest path missing');",
+    "fs.mkdirSync(path.dirname(match[1]), { recursive: true });",
+    "fs.writeFileSync(match[1], JSON.stringify({ jobs: [] }), 'utf8');",
+    `fs.writeFileSync(${JSON.stringify(agentPidFile)}, String(process.pid), 'utf8');`,
+    'setInterval(() => {}, 1000);',
+  ].join('\n'), 'utf8');
+
+  const isolatedEnvKeys = ['HOME', 'USERPROFILE', 'GH_MAESTRO_RUNTIME_DIR', 'GH_MAESTRO_WORKSPACE', 'GH_MAESTRO_WORKER', 'GH_MAESTRO_ISSUE', 'ISSUE'];
+  const previousEnv = new Map(isolatedEnvKeys.map(key => [key, process.env[key]]));
+  const originalEnv = cleanSpawnEnv();
+  for (const key of isolatedEnvKeys) {
+    if (Object.prototype.hasOwnProperty.call(originalEnv, key)) process.env[key] = originalEnv[key];
+    else delete process.env[key];
+  }
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeRoot;
+  process.env.GH_MAESTRO_WORKSPACE = workspace;
+
+  let phaseResult;
+  let cleanupResult;
+  let lockOwner;
+  const lockFile = reviewArtifactPath(workspace, pr, '.running');
+  try {
+    const skillPath = resolveSkillMdPath('codex', process.execPath, 'gh-maestro-reviewer');
+    assert.ok(skillPath, 'the repository agent map resolves the isolated Codex skill path');
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, 'isolated test skill\n', 'utf8');
+    lockOwner = processLiveness.captureSelf({ workspace, kind: 'review-manager', name: `test-${pr}` });
+    phaseResult = await superviseReviewManager({
+      pr,
+      repo: 'owner/repo',
+      workspace,
+      ghDir: path.join(workspace, '.gh-maestro'),
+      lockFile,
+      lockOwner,
+      logFile: reviewArtifactPath(workspace, pr, '.log'),
+      outputFile: reviewArtifactPath(workspace, pr, '.json'),
+      deadlineMs: 10000,
+      issue: 796,
+      startedAt: '2026-11-19T00:00:00.000Z',
+      log: () => {},
+      signal: { aborted: false },
+    });
+
+    assert.equal(phaseResult.outcome, 'setup-failed');
+    assert.match(phaseResult.reason, /manifest 不正/);
+    assert.ok(Number.isInteger(phaseResult.agentPid));
+    assert.equal(typeof phaseResult.agentRef, 'string');
+    assert.ok(fs.existsSync(agentPidFile), 'fake phase1 agent wrote the invalid manifest before staying alive');
+    assert.equal(processLiveness.observe(phaseResult.agentRef), 'alive');
+    assert.ok(fs.existsSync(worktreeDir), 'worktree remains present while the phase1 agent is live');
+
+    let worktreePresentWhenStopWasConfirmed = false;
+    const observingLiveness = {
+      observe(ref) {
+        const state = processLiveness.observe(ref);
+        if (ref === phaseResult.agentRef && state === 'dead') {
+          worktreePresentWhenStopWasConfirmed = fs.existsSync(worktreeDir);
+        }
+        return state;
+      },
+    };
+    cleanupResult = await boundedCleanup({
+      pid: phaseResult.agentPid,
+      processRef: phaseResult.agentRef,
+      worktreeDir: phaseResult.reviewWtDir,
+      workspace,
+      pr,
+      lockFile,
+      lockOwner,
+      liveness: observingLiveness,
+      gracefulShutdownMs: 0,
+      log: () => {},
+    });
+    assert.equal(cleanupResult.processStopped, true);
+    assert.equal(worktreePresentWhenStopWasConfirmed, true, 'boundedCleanup confirms the agent stopped before removing its worktree');
+    assert.equal(cleanupResult.worktreeCleaned, true);
+    assert.equal(fs.existsSync(worktreeDir), false);
+  } finally {
+    if (phaseResult?.agentPid && !cleanupResult?.processStopped) {
+      await boundedCleanup({
+        pid: phaseResult.agentPid,
+        processRef: phaseResult.agentRef,
+        worktreeDir: phaseResult.reviewWtDir,
+        workspace,
+        pr,
+        lockFile,
+        lockOwner,
+        gracefulShutdownMs: 0,
+        log: () => {},
+      });
+    }
+    if (lockOwner) processLiveness.release(lockOwner);
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test('setupReviewWorktree: 作成した worktree から workspace の node_modules を参照できる（junction 経由）', () => {
   const ws = path.join(tmpBase, 'setup-link-ws');
