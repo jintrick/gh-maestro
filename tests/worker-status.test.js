@@ -819,6 +819,27 @@ test('main: list --json は機械可読な JSON 配列を出力する', () => {
   }
 });
 
+test('main: list --json は開始時刻が不明な生存ワーカーにも数値の elapsedSeconds を返す', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-unknown-duration-');
+  const liveness = createResourceLiveness({ probePid: pid => pid === 111 ? 'alive' : 'dead' });
+  const processRef = liveness.captureProcess(111, 'unknown-duration-worker');
+  const workerEntry = liveness.writeRef({ pid: 111 }, processRef);
+  workerStatus._setLiveness(liveness);
+
+  try {
+    writeWorkers(workspace, { 'worker-a': workerEntry });
+    const result = runMain(['list', '--workspace', workspace, '--json']);
+    assert.equal(result.code, 0);
+    const [worker] = JSON.parse(result.lines.join('\n'));
+    assert.equal(worker.running, true);
+    assert.equal(worker.startTime, null);
+    assert.equal(worker.elapsedSeconds, 0);
+  } finally {
+    workerStatus._setLiveness(null);
+    removeWorkspace(workspace);
+  }
+});
+
 test('list --issue: 履歴上の異常終了をJSONと非カラー表示に含め、開始記録だけではrunningにしない', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-issue-history-');
   const base = Date.parse('2026-10-01T00:00:00.000Z');

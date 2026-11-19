@@ -88,10 +88,9 @@ function select(workspace, pr, repo, head, validateManifest) {
   }
   return prior.state.manifest.headRefOid === head ? prior : null;
 }
-function begin(workspace, pr, validateManifest) {
+function begin(workspace, pr) {
   const dir = root(workspace, pr);
   fs.mkdirSync(dir, { recursive: true });
-  if (typeof validateManifest === 'function' && load(workspace, pr, validateManifest)) return false;
   atomicWriteJson(path.join(dir, 'latest.json'), { version: 1, pending: true });
   return true;
 }

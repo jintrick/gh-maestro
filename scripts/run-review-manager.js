@@ -1220,7 +1220,7 @@ async function superviseReviewManager({
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.writeFileSync(manifestPath, JSON.stringify(prior.state.manifest, null, 2));
   } else {
-    try { checkpoint.begin(workspace, pr, validateManifest); } catch (error) {
+    try { checkpoint.begin(workspace, pr); } catch (error) {
       return { outcome: 'setup-failed', exitCode: 1, reviewWtDir, reason: error.message };
     }
     const { prompt: phase1Prompt } = buildPrompt({ pr, repo, issue, workspace: reviewWtDir, mainGhDir: ghDir, skillPath, priorFindingsFile });

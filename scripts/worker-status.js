@@ -1079,7 +1079,9 @@ function main(argv = process.argv.slice(2)) {
           running: w.running,
           status: w.status,
           startTime: w.startTime,
-          elapsedSeconds: w.elapsedSeconds,
+          // Preserve the list JSON contract used before cycle projection: elapsedSeconds is numeric.
+          // A missing start/stop timestamp has no known duration, so expose the collector's zero fallback.
+          elapsedSeconds: Number.isFinite(w.elapsedSeconds) ? w.elapsedSeconds : 0,
         };
         if (w.jobs) {
           entry.jobs = w.jobs.map(j => ({
@@ -1090,7 +1092,7 @@ function main(argv = process.argv.slice(2)) {
             running: j.running,
             status: j.running ? 'running' : 'stopped',
             startTime: j.startTime,
-            elapsedSeconds: j.elapsedSeconds,
+            elapsedSeconds: Number.isFinite(j.elapsedSeconds) ? j.elapsedSeconds : 0,
             agentId: j.agentId,
           }));
         }

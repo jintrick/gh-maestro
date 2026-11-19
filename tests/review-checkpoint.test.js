@@ -110,10 +110,10 @@ test('resume selects only the same PR, repository and HEAD, preserving older run
   assert.ok(fs.existsSync(entry.file));
 });
 
-test('段階1の失敗終端は次の起動で再開されず、確定済みチェックポイントを保持する', () => {
+test('新しい周回はpendingで旧チェックポイントを選ばず、失敗終端後も確定済み状態を保持する', () => {
   const ws = scope.mkdtemp('rm-failed-checkpoint-');
   try {
-    checkpoint.begin(ws, 11, validate);
+    checkpoint.begin(ws, 11);
     assert.equal(checkpoint.failPending(ws, 11), true);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ws, '.gh-maestro', 'records', 'pr', '11', 'review', 'runs', 'latest.json'), 'utf8')), {
       version: 1, failed: true,
@@ -122,9 +122,20 @@ test('段階1の失敗終端は次の起動で再開されず、確定済みチ�
     assert.equal(checkpoint.select(ws, 11, manifest.repo, manifest.headRefOid, validate), null);
 
     const confirmed = checkpoint.create(ws, 11, manifest, validate);
+    const confirmedBefore = fs.readFileSync(confirmed.file, 'utf8');
+    // A validator argument from the previous begin API must not let a new cycle reuse the old pointer.
     checkpoint.begin(ws, 11, validate);
-    assert.equal(checkpoint.load(ws, 11, validate).id, confirmed.id);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ws, '.gh-maestro', 'records', 'pr', '11', 'review', 'runs', 'latest.json'), 'utf8')), {
+      version: 1, pending: true,
+    });
+    assert.equal(checkpoint.load(ws, 11, validate), null);
+    assert.equal(checkpoint.select(ws, 11, manifest.repo, manifest.headRefOid, validate), null);
+    assert.equal(checkpoint.failPending(ws, 11), true);
+    assert.equal(checkpoint.load(ws, 11, validate), null);
+    assert.equal(fs.readFileSync(confirmed.file, 'utf8'), confirmedBefore);
+
+    const currentCycle = checkpoint.create(ws, 11, manifest, validate);
     assert.equal(checkpoint.failPending(ws, 11), false);
-    assert.equal(checkpoint.load(ws, 11, validate).id, confirmed.id);
+    assert.equal(checkpoint.load(ws, 11, validate).id, currentCycle.id);
   } finally { fs.rmSync(ws, { recursive: true, force: true }); }
 });
