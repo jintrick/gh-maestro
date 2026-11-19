@@ -33,6 +33,7 @@ const { readReviewManagerGeneration } = require('../../scripts/shared/review-man
 const { reviewManagerStartingPath } = require('../../scripts/shared/running-review-managers');
 const { spawnSync } = require('child_process');
 const { cleanSpawnEnv } = require('../_spawn-env');
+const { resolveSkillMdPath } = require('../../scripts/shared/skill-install-path');
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'run-review-manager.js');
 
 const tmpBase = path.join(os.tmpdir(), 'gh-maestro-test-run-rm-' + Date.now());
@@ -335,8 +336,6 @@ test('superviseReviewManager: phase1 manifest validation failure stops the live 
   assert.equal(git(['push', 'origin', `HEAD:refs/pull/${pr}/head`]).status, 0);
 
   fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
-  fs.mkdirSync(path.join(home, '.codex', 'skills', 'gh-maestro-reviewer'), { recursive: true });
-  fs.writeFileSync(path.join(home, '.codex', 'skills', 'gh-maestro-reviewer', 'SKILL.md'), 'isolated test skill\n', 'utf8');
   fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
     agents: {
       codex: {
@@ -380,6 +379,10 @@ test('superviseReviewManager: phase1 manifest validation failure stops the live 
   let lockOwner;
   const lockFile = reviewArtifactPath(workspace, pr, '.running');
   try {
+    const skillPath = resolveSkillMdPath('codex', process.execPath, 'gh-maestro-reviewer');
+    assert.ok(skillPath, 'the repository agent map resolves the isolated Codex skill path');
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, 'isolated test skill\n', 'utf8');
     lockOwner = processLiveness.captureSelf({ workspace, kind: 'review-manager', name: `test-${pr}` });
     phaseResult = await superviseReviewManager({
       pr,
