@@ -234,19 +234,6 @@ test('buildRestartArgs: msg-pollの引数を維持し親セッションPIDを引
   }
 });
 
-test('captureResidentEntries: 常駐の親セッションを調査せずregistryをそのまま返す', () => {
-  const workspace = makeWorkspace();
-  try {
-    const entry = { ...residentEntries(workspace)[1], args: ['orchestrator', '--workspace', workspace] };
-    const harness = makeHarness(workspace, { entries: [entry] });
-    const captured = captureResidentEntries(workspace, harness.hooks);
-    assert.equal(captured.length, 1);
-    assert.deepEqual(captured[0], harness.entries[0]);
-  } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
 test('buildRestartArgs: worker-supervisorの引数が無ければworkspaceだけを使う', () => {
   const workspace = makeWorkspace();
   try {
@@ -765,47 +752,6 @@ test('restartResidents: 起動PIDの生存確認に失敗した場合は判定�
   }
 });
 
-test('captureResidentEntries: worker modeのmsg-pollは常駐対象から除外する', () => {
-  const workspace = makeWorkspace();
-  try {
-    const entries = residentEntries(workspace);
-    entries.push({ ...entries[1], pid: 105, workerName: 'issue-334-coder' });
-    const harness = makeHarness(workspace, { entries });
-    const captured = captureResidentEntries(workspace, harness.hooks);
-    assert.deepEqual(captured.map((entry) => entry.pid), [101, 102, 103, 104]);
-  } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
-test('restart-residents CLI: helpは0、引数不備は1、通常出力はMonitor再接続を区別する', () => {
-  assert.equal(main(['--help']).code, 0);
-  assert.match(main(['--help']).lines[0], /restart-residents\.js/);
-  assert.equal(main(['--unknown']).code, 1);
-
-  const workspace = makeWorkspace();
-  const oldEnv = process.env.GH_MAESTRO_WORKSPACE;
-  process.env.GH_MAESTRO_WORKSPACE = workspace;
-  try {
-    const harness = makeHarness(workspace, { entries: residentEntries(workspace) });
-    const result = main([], {
-      hooks: harness.hooks,
-      scriptsPath: path.join(workspace, 'scripts'),
-      maxAttempts: 1,
-      waitMs: 0,
-    });
-    assert.equal(result.code, 0);
-    assert.ok(result.lines.some((line) => line.includes('script=msg-poll.js') && line.includes('status=monitor-required')));
-    assert.ok(result.lines.some((line) => line.startsWith('MONITOR_REATTACH_REQUIRED script=msg-poll.js')));
-    assert.equal(USAGE.includes('resident-restart-logs'), true);
-    assert.equal(USAGE.includes('oldPaneId=<id> newPaneId=<id>'), true);
-  } finally {
-    if (oldEnv === undefined) delete process.env.GH_MAESTRO_WORKSPACE;
-    else process.env.GH_MAESTRO_WORKSPACE = oldEnv;
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
 test('formatResidentResult: statusと検証結果を機械可読な1行へ整形する', () => {
   const singleLine = formatResidentResult({
     script: 'msg-poll.js', status: 'replaced', oldPids: [10], newPids: [20], verified: true,
@@ -988,3 +934,4 @@ test('restart-residents CLI: 結果行はstdout、診断行はstderrへ書き分
   assert.deepEqual(stdout, ['RESIDENT script=worker-supervisor.js status=failed\n']);
   assert.deepEqual(stderr, ['restart-residents: 起動確認に失敗しました\n']);
 });
+

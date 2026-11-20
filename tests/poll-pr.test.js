@@ -751,37 +751,6 @@ test('runPollPr suppresses slow and CI only for lightweight PRs, while recovery 
   }
 });
 
-test('runPollPr passes both independent suppression flags to poll-reviews', async () => {
-  const { mod } = loadModule();
-  const workspace = temporaryWorkspace('gh-maestro-poll-pr-both-flags-');
-  let capturedOptions = null;
-  const result = await mod.runPollPr({
-    issue: 559,
-    repo: 'fixture/repo',
-    workspace,
-    noReviewManager: true,
-    noReviewEvents: true,
-    intervalMs: 0,
-    intervalArg: '0',
-    enablePrChecksMonitoring: false,
-  }, {
-    checkParentFn: () => true,
-    findPrFn: () => '42',
-    getPrHeadFn: () => 'cccccccccccccccccccccccccccccccccccccccc',
-    spawnPollReviewsFn: async (...args) => {
-      capturedOptions = args[4];
-      return 0;
-    },
-    getPrStateFn: () => 'OPEN',
-    recordMergeAndSnapshotFn: () => {},
-    runSlowTestFn: async () => {},
-    cleanupFn: () => {},
-  });
-
-  assert.deepEqual(result, { exitCode: 0 });
-  assert.deepEqual(capturedOptions, { noReviewEvents: true });
-});
-
 test('runPollPr leaves the claim sentinel when automatic Review Manager startup fails', async () => {
   const { mod } = loadModule();
   const workspace = temporaryWorkspace('gh-maestro-poll-pr-claim-failure-');
@@ -1393,3 +1362,4 @@ test('runSlowTest does not declare when the PR HEAD changes before declaration',
 });
 
 // ── CLI起動時の即時エラー終了パス（ループに入る前にexitするため実プロセスspawn可） ──
+

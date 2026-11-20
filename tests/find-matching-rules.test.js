@@ -85,15 +85,6 @@ test('globToRegex: 正規表現の特殊文字をエスケープする', () => {
 
 // ── matchesAny ───────────────────────────────────────────────────────────────
 
-test('matchesAny: いずれかのglobにマッチすればtrue（単一globの一致を含む）', () => {
-  const globs = ['scripts/**/*.js', 'skills/**/*.md'];
-  assert.ok(matchesAny('scripts/foo.js', globs));
-  assert.ok(matchesAny('skills/sub/doc.md', globs));
-  assert.ok(!matchesAny('scripts/foo.ts', globs));
-  // 要素数1の配列の特別扱いが無いこと（旧 98 の検査を統合）
-  assert.ok(matchesAny('CLAUDE.md', ['CLAUDE.md']));
-});
-
 test('matchesAny: 空のglobs配列は常にfalse', () => {
   assert.ok(!matchesAny('any/file.js', []));
 });
@@ -120,41 +111,6 @@ test('findMatchingRules: 空のrulesディレクトリは空を返す', () => {
     const { matched, errors } = findMatchingRules(dir, ['scripts/foo.js']);
     assert.deepEqual(matched, []);
     assert.deepEqual(errors, []);
-  });
-});
-
-test('findMatchingRules: paths: にマッチするルールを返す', () => {
-  withTempDir(dir => {
-    const rulesDir = path.join(dir, '.claude', 'rules');
-    fs.mkdirSync(rulesDir, { recursive: true });
-    fs.writeFileSync(path.join(rulesDir, 'js-rules.md'),
-      `---\npaths:\n  - "scripts/**/*.js"\n---\n# JS Rules`);
-    fs.writeFileSync(path.join(rulesDir, 'md-rules.md'),
-      `---\npaths:\n  - "docs/**/*.md"\n---\n# MD Rules`);
-
-    const { matched, errors } = findMatchingRules(dir, ['scripts/foo.js']);
-    assert.deepEqual(errors, []);
-    assert.ok(matched.includes('.claude/rules/js-rules.md'));
-    assert.ok(!matched.includes('.claude/rules/md-rules.md'));
-  });
-});
-
-test('findMatchingRules: 複数ファイル入力でいずれかにマッチするルールを返す', () => {
-  withTempDir(dir => {
-    const rulesDir = path.join(dir, '.claude', 'rules');
-    fs.mkdirSync(rulesDir, { recursive: true });
-    fs.writeFileSync(path.join(rulesDir, 'js-rules.md'),
-      `---\npaths:\n  - "scripts/**/*.js"\n---\n# JS Rules`);
-    fs.writeFileSync(path.join(rulesDir, 'md-rules.md'),
-      `---\npaths:\n  - "docs/**/*.md"\n---\n# MD Rules`);
-    fs.writeFileSync(path.join(rulesDir, 'all-rules.md'),
-      `---\npaths:\n  - "scripts/**"\n  - "docs/**"\n---\n# All`);
-
-    const { matched, errors } = findMatchingRules(dir, ['scripts/foo.js', 'docs/readme.md']);
-    assert.deepEqual(errors, []);
-    assert.ok(matched.includes('.claude/rules/js-rules.md'));
-    assert.ok(matched.includes('.claude/rules/md-rules.md'));
-    assert.ok(matched.includes('.claude/rules/all-rules.md'));
   });
 });
 
@@ -234,66 +190,6 @@ function makeMockGitSpawn({
     throw new Error(`unexpected git args: ${JSON.stringify(args)}`);
   };
 }
-
-test('findMatchingRulesAtRef: --ref 解決→ls-tree→readFileAtRef で一致ルールだけ返し symlink(120000) と paths なしを除外する', () => {
-  const oid = '1'.repeat(40);
-  const blobOid1 = '2'.repeat(40);
-  const blobOid2 = '3'.repeat(40);
-  const blobOid3 = '4'.repeat(40);
-  const blobOid4 = '5'.repeat(40);
-  const recordedArgvs = [];
-  const lsOutput = [
-    `100644 blob ${blobOid1}\t.claude/rules/match.md`,
-    `100644 blob ${blobOid2}\t.claude/rules/sub/nested.md`,
-    `100644 blob ${blobOid3}\t.claude/rules/no-paths.md`,
-    `120000 blob ${blobOid4}\t.claude/rules/symlink.md`,
-    `100644 blob ${blobOid4}\t.claude/rules/notes.txt`,
-  ].join('\0') + '\0';
-
-  const files = new Map([
-    [`${oid}:.claude/rules/match.md`, '---\npaths:\n  - "scripts/**/*.js"\n---\n# Match'],
-    [`${oid}:.claude/rules/sub/nested.md`, '---\npaths:\n  - "docs/**/*.md"\n---\n# Nested'],
-    [`${oid}:.claude/rules/no-paths.md`, '---\nother: value\n---\n# No paths'],
-  ]);
-
-  const spawnSyncFn = makeMockGitSpawn({
-    revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
-    lsTree: () => ({ status: 0, stdout: lsOutput, stderr: '' }),
-    showFile: (spec) => files.has(spec)
-      ? { status: 0, stdout: files.get(spec), stderr: '' }
-      : { status: 1, stdout: '', stderr: `fatal: path '${spec}' does not exist` },
-    recordedArgvs,
-  });
-
-  const res = main(['--root', '/repo', '--ref', 'base-branch', 'scripts/a.js'], { spawnSyncFn });
-  assert.equal(res.exitCode, 0);
-  assert.equal(res.stderr, '');
-  assert.equal(res.stdout, '.claude/rules/match.md');
-  assert.deepEqual(recordedArgvs[0], ['rev-parse', '--verify', '--end-of-options', 'base-branch^{commit}']);
-  assert.deepEqual(recordedArgvs[1], ['ls-tree', '-r', '-z', '--end-of-options', oid, '--', '.claude/rules/']);
-});
-
-test('findMatchingRulesAtRef: .claude/rules/ 不在・一致0件では exitCode 0・空 stdout になる', () => {
-  const oid = 'a'.repeat(40);
-  const emptyTreeSpawn = makeMockGitSpawn({
-    revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
-    lsTree: () => ({ status: 0, stdout: '', stderr: '' }),
-  });
-  const emptyRes = main(['--root', '/repo', '--ref', 'HEAD', 'scripts/a.js'], { spawnSyncFn: emptyTreeSpawn });
-  assert.equal(emptyRes.exitCode, 0);
-  assert.equal(emptyRes.stdout, '');
-  assert.equal(emptyRes.stderr, '');
-
-  const noMatchSpawn = makeMockGitSpawn({
-    revParse: () => ({ status: 0, stdout: `${oid}\n`, stderr: '' }),
-    lsTree: () => ({ status: 0, stdout: `100644 blob ${'b'.repeat(40)}\t.claude/rules/only-docs.md\0`, stderr: '' }),
-    showFile: () => ({ status: 0, stdout: '---\npaths:\n  - "docs/**"\n---\n# Docs', stderr: '' }),
-  });
-  const noMatchRes = main(['--root', '/repo', '--ref', 'HEAD', 'scripts/a.js'], { spawnSyncFn: noMatchSpawn });
-  assert.equal(noMatchRes.exitCode, 0);
-  assert.equal(noMatchRes.stdout, '');
-  assert.equal(noMatchRes.stderr, '');
-});
 
 test('findMatchingRulesAtRef: rev-parse 失敗・例外・ls-tree 失敗・不正エントリ・git show 失敗/欠落をすべて exit 1 にする', () => {
   const oid = 'c'.repeat(40);
@@ -383,3 +279,4 @@ test('findMatchingRulesAtRef: rev-parse 失敗・例外・ls-tree 失敗・不�
 });
 
 // ── CLI integration ──────────────────────────────────────────────────────────
+

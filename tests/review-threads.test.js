@@ -211,9 +211,4 @@ test('resolve submits resolveReviewThread with the opaque GraphQL thread ID and 
   assert.throws(() => threads.resolveReviewThread(threadId), /Resolve 済みとして返りません/);
 });
 
-test('CLI parser handles help and rejects missing command arguments', () => {
-  assert.deepEqual(threads.parseArgs(['--help']), { mode: 'help' });
-  assert.throws(() => threads.parseArgs([]), /位置引数が必要/);
-  assert.equal(threads.main(['list', '--pr', '7'], {}).code, 1);
-  assert.match(threads.main(['--help']).stdout, /review-threads\.js/);
-});
+

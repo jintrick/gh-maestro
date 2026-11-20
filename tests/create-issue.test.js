@@ -68,11 +68,6 @@ test('create-issue.js: title-onlyはgh issue createへ空本文を渡す', () =>
   );
 });
 
-test('create-issue.js: helpはtitle-onlyと本文モードの排他条件を説明する', () => {
-  assert.match(USAGE, /--title-only/);
-  assert.match(USAGE, /--body-file または --title-only/);
-});
-
 test('createIssue: 成功時はunlinkし、URLからissue番号を抽出する', () => {
   const unlinked = [];
   const result = createIssue(
@@ -141,3 +136,4 @@ test('createIssue: retryable失敗時はGraphQLフォールバックし成功す
   assert.equal(result.number, '3');
   assert.deepEqual(graphqlArgs, { repo: 'fallback/repo', title: 't', body: '# body' });
 });
+

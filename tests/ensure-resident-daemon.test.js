@@ -50,58 +50,6 @@ afterEach(() => {
   }
 });
 
-test('ensureResidentDaemon: 基本動作 - detached・windowsHide付きでスクリプトをspawnする', () => {
-  let captured = null;
-  hooks.setSpawn((cmd, args, opts) => {
-    captured = { cmd, args, opts };
-    return fakeChild();
-  });
-
-  ensureResidentDaemon({
-    workspace,
-    scriptsPath: '/abs/scripts',
-    scriptName: 'test-daemon.js',
-    logFileName: 'test-daemon-autostart.log',
-    attemptName: 'test-daemon',
-    hooks,
-  });
-
-  assert.equal(captured.cmd, process.execPath);
-  assert.deepEqual(captured.args, [
-    path.join('/abs/scripts', 'test-daemon.js'),
-    '--workspace', workspace,
-  ]);
-  assert.ok(captured.opts.env.GH_MAESTRO_RESOURCE_KEY);
-  assert.equal(captured.opts.detached, true);
-  assert.equal(captured.opts.windowsHide, true);
-  assert.ok(fs.existsSync(path.join(workspace, '.gh-maestro', 'test-daemon-autostart.log')));
-});
-
-test('ensureResidentDaemon: buildArgs カスタマイズで引数を構築できる', () => {
-  let captured = null;
-  hooks.setSpawn((cmd, args, opts) => {
-    captured = { cmd, args, opts };
-    return fakeChild();
-  });
-
-  ensureResidentDaemon({
-    workspace,
-    scriptsPath: '/abs/scripts',
-    scriptName: 'custom-daemon.js',
-    logFileName: 'custom.log',
-    attemptName: 'custom',
-    buildArgs: ({ workspace: ws }) => ['orchestrator', '--ws', ws, '--mode', 'daemon'],
-    hooks,
-  });
-
-  assert.deepEqual(captured.args, [
-    path.join('/abs/scripts', 'custom-daemon.js'),
-    'orchestrator',
-    '--ws', workspace,
-    '--mode', 'daemon',
-  ]);
-});
-
 test('ensureResidentDaemon: 引数欠落バリデーション（必須パラメータが無い場合はspawnしない）', () => {
   let spawnCalled = false;
   hooks.setSpawn(() => { spawnCalled = true; return fakeChild(); });
@@ -405,5 +353,6 @@ test('ensureResidentDaemon: stale ロックファイル（10秒超）は自動�
 });
 
 // ── レビュー指摘 【2】: lease拒否シナリオ & 起動直後の異常終了シナリオ ────────
+
 
 

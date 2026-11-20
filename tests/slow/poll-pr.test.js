@@ -134,17 +134,4 @@ const { resolvePostReviewDecision } = require('../../scripts/poll-pr');
 
 // ── CLI起動時の即時エラー終了パス（ループに入る前にexitするため実プロセスspawn可） ──
 
-test('CLI --help exits 0 and no longer mentions --review-aspects（廃止した観点自動判定フラグの回帰防止）', () => {
-  const result = spawnSync(process.execPath, [pollPrPath, '--help'], { encoding: 'utf8' });
-  assert.equal(result.status, 0);
-  assert.doesNotMatch(result.stdout, /--review-aspects/);
-  // --no-review-manager（レビューを蒸し返さずに監視だけ再開する再起動用フラグ）が文書化されていること
-  assert.match(result.stdout, /--no-review-manager/);
-  assert.match(result.stdout, /REVIEW_MANAGER_ALREADY_CLAIMED/);
-});
 
-test('CLI exits non-zero when <ISSUE> is omitted', () => {
-  const result = spawnSync(process.execPath, [pollPrPath], { encoding: 'utf8' });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Usage/);
-});

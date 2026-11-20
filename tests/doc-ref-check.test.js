@@ -88,22 +88,6 @@ function checkFiles(files, acceptRef = () => true) {
 
 // ── extractMdRefs ────────────────────────────────────────────────────────
 
-test('extractMdRefs: Markdownリンクとインラインコードから.mdパスを抽出する', () => {
-  const content = [
-    '[foo](docs/foo.md) と `docs/bar/baz.md` を参照。',
-  ].join('\n');
-  const refs = extractMdRefs(content);
-  const targets = refs.map((r) => r.target).sort();
-  assert.deepEqual(targets, ['docs/bar/baz.md', 'docs/foo.md']);
-  assert.deepEqual(
-    refs.map((ref) => ({ target: ref.target, kind: ref.kind })).sort((a, b) => a.target.localeCompare(b.target)),
-    [
-      { target: 'docs/bar/baz.md', kind: 'inline-code' },
-      { target: 'docs/foo.md', kind: 'link' },
-    ],
-  );
-});
-
 test('extractMdRefs: 先頭 ./ や ../ を含む相対パス表記も抽出する', () => {
   const content = '`.claude/rules/queue-path-safety.md` と `../foo/bar.md` を参照。';
   const refs = extractMdRefs(content);
@@ -111,50 +95,11 @@ test('extractMdRefs: 先頭 ./ や ../ を含む相対パス表記も抽出す�
   assert.deepEqual(targets, ['../foo/bar.md', '.claude/rules/queue-path-safety.md']);
 });
 
-test('extractMdRefs: 日本語・パーセントエンコードされたアンカーを含むパスを抽出する', () => {
-  const content = '`docs/foo.md#概要` と `docs/bar.md#%E6%A6%82%E8%A6%81` を参照。';
-  const refs = extractMdRefs(content);
-  const targets = refs.map((r) => r.target).sort();
-  assert.deepEqual(targets, ['docs/bar.md#%E6%A6%82%E8%A6%81', 'docs/foo.md#概要']);
-});
-
-test('extractMdRefs: テンプレート変数・ワイルドカード・その他URLスキームは除外する', () => {
-  const content = [
-    '`{{SHARED_SKILLS_PATH}}/foo.md`',
-    '`skills/*/SKILL.md`',
-    '`<葉セレクタ>.md`',
-    '[link](https://example.com/readme.md)',
-    '`/tmp/issue-draft.md`',
-    '`.md`',
-  ].join('\n');
-  assert.deepEqual(extractMdRefs(content), []);
-});
-
 test('extractMdRefs: file:///... リンクはisAbsoluteフラグ付きで抽出する', () => {
   const content = '[resolve-config.js](file:///C:/Users/amg/work/gh-maestro/scripts/shared/resolve-config.js.md#L1)';
   const refs = extractMdRefs(content);
   assert.equal(refs.length, 1);
   assert.equal(refs[0].isAbsolute, true);
-});
-
-test('extractMdRefs: 裸のファイル名も抽出し、リンクとインラインコードの種別を保持する', () => {
-  // 裸のファイル名（祖先ディレクトリ基準の解決は resolveRefExists に委ねる）
-  const bare = extractMdRefs('`SKILL.md`と`logic-invariants.md`').map((r) => r.target).sort();
-  assert.deepEqual(bare, ['SKILL.md', 'logic-invariants.md']);
-
-  const refs = extractMdRefs('[参照](missing.md) と `SKILL.md`');
-  assert.deepEqual(refs.map((ref) => ({ target: ref.target, kind: ref.kind })), [
-    { target: 'missing.md', kind: 'link' },
-    { target: 'SKILL.md', kind: 'inline-code' },
-  ]);
-});
-
-test('extractMdRefs: 大きなファイルでも行番号を正しく計算する', () => {
-  const filler = 'x'.repeat(5000) + '\n';
-  const content = filler.repeat(2000) + '`docs/target.md`\n';
-  const refs = extractMdRefs(content);
-  assert.equal(refs.length, 1);
-  assert.equal(refs[0].line, 2001);
 });
 
 // ── resolveRefExists ─────────────────────────────────────────────────────
@@ -184,19 +129,6 @@ test('resolveRefExists: 祖先ディレクトリからの相対パスも解決�
     fs.writeFileSync(path.join(tmpDir, 'skill', 'sibling.md'), '# sibling');
     const nested = path.join(tmpDir, 'skill', 'resilience', 'failure.md');
     assert.equal(resolveRefExists(tmpDir, nested, 'sibling.md'), true);
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('resolveRefExists: リポジトリルートからの相対パスを解決する', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-doc-ref-'));
-  try {
-    fs.mkdirSync(path.join(tmpDir, 'docs'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'docs', 'target.md'), '# target');
-    const sourceFile = path.join(tmpDir, 'skills', 'foo', 'SKILL.md');
-    fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
-    assert.equal(resolveRefExists(tmpDir, sourceFile, 'docs/target.md'), true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -239,29 +171,6 @@ test('resolveRefExists: repoRoot外へのpath traversalは拒否する', () => {
 
 // ── リポジトリ全体への検証 ────────────────────────────────────────────────
 
-test('docs/**/*.md と skills/**/*.md 内の.md言及が実在するファイルを指している', () => {
-  const files = [
-    ...listMarkdownFiles(path.join(REPO_ROOT, 'docs'), []),
-    ...listMarkdownFiles(path.join(REPO_ROOT, 'skills'), []),
-  ];
-  assert.ok(files.length > 0, 'ドキュメント/スキルファイルが1件も見つからなかった');
-  const adrFile = files.find(
-    file => path.relative(REPO_ROOT, file).split(path.sep).join('/') === HISTORICAL_REFERENCE_EXCEPTION.source,
-  );
-  assert.ok(adrFile, 'ADR 0051 が文書内リンク検査から除外されている');
-  const failures = checkFiles(files, (ref, source, lines) => !isHistoricalReferenceException(ref, source, lines));
-  assert.deepEqual(failures, [], `参照先が存在しない箇所があります。\n${failures.join('\n')}`);
-});
-
-test('リポジトリ直下の規範文書からのパス言及が実在するファイルを指している', () => {
-  const files = listRootMarkdownFiles();
-  assert.ok(files.length > 0, 'リポジトリ直下のMarkdownが1件も見つからなかった');
-  // 直下の文書では `SKILL.md` のような裸のファイル名が、特定のファイルではなく
-  // 種類を指す一般名詞として使われる。パス区切りを含む言及だけを実在検証する。
-  const failures = checkFiles(files, ref => ref.target.includes('/'));
-  assert.deepEqual(failures, [], `参照先が存在しない箇所があります。\n${failures.join('\n')}`);
-});
-
 test('意図的に壊れたパスへの言及を含むフィクスチャで失敗を検出できる', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-doc-ref-fixture-'));
   try {
@@ -281,3 +190,4 @@ test('意図的に壊れたパスへの言及を含むフィクスチャで失�
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+

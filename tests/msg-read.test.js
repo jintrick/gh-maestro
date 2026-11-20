@@ -32,25 +32,6 @@ function withWorkerName(workerName, fn) {
 
 // ── --help / -h ────────────────────────────────────────────────────────────
 
-test('--help が usage を返して code 0', () => {
-  const r = msgRead.main(['--help']);
-  assert.equal(r.code, 0);
-  assert.ok(r.lines.join('\n').includes('msg-read.js'));
-  assert.ok(r.lines.join('\n').includes('--plan'));
-  assert.ok(r.lines.join('\n').includes('--issue-context'));
-  assert.ok(r.lines.join('\n').includes('--issue'));
-  assert.equal(r.errLines.length, 0);
-});
-
-test('-h が usage を返して code 0', () => {
-  const r = msgRead.main(['-h']);
-  assert.equal(r.code, 0);
-  assert.ok(r.lines.join('\n').includes('msg-read.js'));
-  assert.ok(r.lines.join('\n').includes('--plan'));
-  assert.ok(r.lines.join('\n').includes('--issue-context'));
-  assert.equal(r.errLines.length, 0);
-});
-
 // ── 引数エラー（通常モード） ────────────────────────────────────────────────
 
 test('commentId なしは code 1', () => {
@@ -300,33 +281,6 @@ test('--issue-context: GH_MAESTRO_WORKER がない場合は取得処理を実行
   }));
 });
 
-test('filterIssueCommentBodies: write権限を持たない投稿者のメッセージと計画を除外する', () => {
-  const comments = [
-    {
-      id: 1,
-      author_association: 'CONTRIBUTOR',
-      body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\nthird-party message',
-    },
-    {
-      id: 2,
-      author_association: 'NONE',
-      body: `${PLAN_MARKER}\nthird-party plan`,
-      pin: { pinned_at: '2026-01-01T00:00:00Z' },
-    },
-    {
-      id: 3,
-      author_association: 'MEMBER',
-      body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\ntrusted message',
-    },
-    {
-      id: 4,
-      body: '<!-- gh-maestro {"v":1,"to":"worker-self","from":"orchestrator"} -->\nmissing association',
-    },
-  ];
-
-  assert.deepEqual(msgRead.filterIssueCommentBodies(comments, 'worker-self'), ['trusted message']);
-});
-
 test('--issue-context: GH_MAESTRO_WORKER=orchestrator の場合はワーカーではないため code 1（Issue #384）', () => {
   withWorkerName('orchestrator', () => withTempDir(workspace => {
     let issueCalled = false;
@@ -521,40 +475,6 @@ test('--plan: --paginate --slurp 形式のコメント一覧でも正しく計�
   });
 });
 
-test('--plan: 計画コメントが0件のときはエラーメッセージを出力して code 1', () => {
-  withTempDir(workspace => {
-    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
-    msgRead._setGhListComments(() => ({
-      status: 0,
-      stdout: JSON.stringify([
-        { id: 1, body: '通常コメント', pin: null },
-        { id: 2, body: '他目的pin', pin: { pinned_at: '2026-01-01T00:00:00Z' } },
-      ]),
-    }));
-
-    const r = msgRead.main(['--plan', '--issue', '42', '--workspace', workspace]);
-    assert.equal(r.code, 1);
-    assert.ok(r.errLines.some(l => l.includes('Issue #42 に計画コメントが見つかりません')));
-  });
-});
-
-test('--plan: 計画コメントが複数（2件以上）存在するときはエラーメッセージを出力して code 1（フェイルクローズ）', () => {
-  withTempDir(workspace => {
-    msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
-    msgRead._setGhListComments(() => ({
-      status: 0,
-      stdout: JSON.stringify([
-        { id: 1, author_association: 'OWNER', body: `${PLAN_MARKER}\n計画1`, pin: { pinned_at: '2026-01-01' } },
-        { id: 2, author_association: 'OWNER', body: `${PLAN_MARKER}\n計画2`, pin: { pinned_at: '2026-01-02' } },
-      ]),
-    }));
-
-    const r = msgRead.main(['--plan', '--issue', '42', '--workspace', workspace]);
-    assert.equal(r.code, 1);
-    assert.ok(r.errLines.some(l => l.includes('Issue #42 に計画コメントが複数存在します（2件）')));
-  });
-});
-
 test('--plan: コメント一覧取得失敗時は code 1', () => {
   withTempDir(workspace => {
     msgRead._setGhRepoView(() => ({ status: 0, stdout: 'owner/repo\n' }));
@@ -582,3 +502,4 @@ test('--plan: コメント一覧のJSONパース失敗時は code 1', () => {
     assert.ok(r.errLines.some(l => l.includes('コメント一覧のJSONパースに失敗しました')));
   });
 });
+

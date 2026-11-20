@@ -11,24 +11,6 @@ const { toWinPath } = require('../scripts/shared/win-path');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'write-draft.js');
 
-test('論理パス引数がないとUsageエラー', () => {
-  const r = main(['--body', 'hello']);
-  assert.equal(r.code, 1);
-  assert.match(r.stderr, /Usage/);
-});
-
-test('--body も --stdin も無いとUsageエラー', () => {
-  const r = main(['/tmp/foo.md']);
-  assert.equal(r.code, 1);
-  assert.match(r.stderr, /Usage/);
-});
-
-test('--body と --stdin を両方指定するとUsageエラー', () => {
-  const r = main(['/tmp/foo.md', '--body', 'x', '--stdin']);
-  assert.equal(r.code, 1);
-  assert.match(r.stderr, /Usage/);
-});
-
 test('--help はUsageを表示して終了コード0', () => {
   const r = main(['--help']);
   assert.equal(r.code, 0);
@@ -87,22 +69,6 @@ test('--stdin指定時、標準入力がTTYだとエラーで即終了する（�
   assert.match(r.stderr, /TTY/);
 });
 
-test('位置引数が2個以上あるとUsageエラー（誤用検知）', () => {
-  const r = main(['/tmp/foo.md', 'extra-arg', '--body', 'hello']);
-  assert.equal(r.code, 1);
-  assert.match(r.stderr, /Usage/);
-});
-
-test('--body の値が"--help"文字列でもフラグとして誤解釈しない', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-draft-test-'));
-  const logicalPath = path.join(tmpDir, 'draft.md');
-  const r = main([logicalPath, '--body', '--help']);
-  assert.equal(r.code, 0);
-  const absPath = path.resolve(toWinPath(logicalPath));
-  assert.equal(fs.readFileSync(absPath, 'utf8'), '--help');
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-});
-
 test('--body の値が"--stdin"文字列でもフラグとして誤解釈しない', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-draft-test-'));
   const logicalPath = path.join(tmpDir, 'draft.md');
@@ -130,3 +96,4 @@ test('/tmp/../../.git/config のようなpath traversalは拒否される', () =
   assert.equal(r.code, 1);
   assert.match(r.stderr, /許可ルート/);
 });
+

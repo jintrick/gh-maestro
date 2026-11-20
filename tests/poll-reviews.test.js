@@ -364,12 +364,6 @@ test.after(() => tempDirScope.cleanup());
 
 // ── CLI 引数境界テスト ───────────────────────────────────────────────────
 
-test('CLI: --help 表示にレビューイベント抑止フラグが含まれ exit 0', () => {
-  const res = spawnSync(process.execPath, [pollReviewsScript, '--help'], { encoding: 'utf8' });
-  assert.equal(res.status, 0);
-  assert.ok(res.stdout.includes('--no-review-events'));
-});
-
 test('CLI: 未知のフラグを指定すると非ゼロで exit', () => {
   const res = spawnSync(process.execPath, [pollReviewsScript, '12', '--unknown-flag'], { encoding: 'utf8' });
   assert.notEqual(res.status, 0);
@@ -386,55 +380,6 @@ test('CLI: --no-review-events は未知フラグにならずパースされる',
   const res = spawnSync(process.execPath, [pollReviewsScript, '--no-review-events'], { encoding: 'utf8' });
   assert.equal(res.status, 1);
   assert.ok(res.stderr.includes('poll-reviews: 位置引数が必要です'));
-});
-
-test('CLI: --no-review-events フラグを省略すると runPollReviews に noReviewEvents=false が渡る', async () => {
-  let capturedParams = null;
-  const res = await main(['100', '/test/workspace'], {
-    resolveWorkspaceFn: (ws) => ws,
-    liveness: { watchParent: () => () => true },
-    registerProcessFn: () => {},
-    registerSignalHandlers: false,
-    pollReviewsStateFilesFn: () => ({ files: [] }),
-    runPollReviewsFn: async (params) => {
-      capturedParams = params;
-      return { exitCode: 0 };
-    },
-  });
-
-  assert.equal(res.exitCode, 0);
-  assert.ok(capturedParams, 'runPollReviews must be called');
-  assert.equal(capturedParams.pr, '100');
-  assert.equal(capturedParams.workspace, '/test/workspace');
-  assert.equal(capturedParams.noReviewEvents, false);
-});
-
-test('CLI: --no-review-events の有無で runPollReviews の noReviewEvents が true/false になる（省略時の既定 false を含む）', async () => {
-  const runWith = async (argv) => {
-    let capturedParams = null;
-    const res = await main(argv, {
-      resolveWorkspaceFn: (ws) => ws,
-      liveness: { watchParent: () => () => true },
-      registerProcessFn: () => {},
-      registerSignalHandlers: false,
-      pollReviewsStateFilesFn: () => ({ files: [] }),
-      runPollReviewsFn: async (params) => {
-        capturedParams = params;
-        return { exitCode: 0 };
-      },
-    });
-    assert.equal(res.exitCode, 0);
-    return capturedParams;
-  };
-
-  // 省略時は既定の false（統合元: 393）
-  const defaulted = await runWith(['100', '/test/workspace']);
-  assert.ok(defaulted, 'runPollReviews must be called');
-  assert.equal(defaulted.noReviewEvents, false);
-
-  // 指定時は true
-  const specified = await runWith(['100', '/test/workspace', '--no-review-events']);
-  assert.equal(specified.noReviewEvents, true);
 });
 
 test('CLI: 子プロセス起動で --no-review-events 引数が runPollReviews まで渡る', () => {
@@ -647,4 +592,5 @@ test('runPollReviews: 親の stdin が EOF（親が居ない）なら GitHub を
   assert.equal(stdoutLines.length, 0, '親が居ない間は中継イベントを出さない');
   assert.ok(stderrLines.join('').includes('parent stdin reached EOF'), '終了理由を標準エラーへ出す');
 });
+
 

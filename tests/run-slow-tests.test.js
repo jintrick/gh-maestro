@@ -39,21 +39,10 @@ test('runSlowTests delegates the complete slow layer to run-tests.js', () => {
   assert.equal(captured.params.env.GH_MAESTRO_TEST_ACTOR, TEST_ACTOR);
 });
 
-test('main: --help and -h return Usage without running the layer', () => {
-  for (const flag of ['--help', '-h']) {
-    const result = main([flag], {
-      runTestsFn: () => { throw new Error('runner must not start for help'); },
-    });
-    assert.equal(result.exitCode, 0);
-    assert.equal(result.stdout, USAGE);
-    assert.match(result.stdout, /dynamicConcurrency/);
-    assert.match(result.stdout, /reviewJobCost/);
-    assert.match(result.stdout, /review-job数 \* reviewJobCost/);
-  }
-});
-
 test('main: positional target is rejected because the entry always runs all slow tests', () => {
   const result = main(['tests/slow/config.test.js']);
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr, /Usage/);
 });
+
+

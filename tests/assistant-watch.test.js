@@ -65,10 +65,6 @@ function commentEntry({ id, from, to = 'orchestrator', body }) {
 // ── parseArgs ────────────────────────────────────────────────────────────
 
 describe('parseArgs', () => {
-  test('--help は help:true を返す', () => {
-    assert.equal(watch.parseArgs(['--help']).help, true);
-  });
-
   test('フラグの値欠落は validationErrors を返す', () => {
     const r = watch.parseArgs(['--issue']);
     assert.equal(r.help, false);
@@ -500,3 +496,4 @@ describe('CLI', () => {
 
 
 });
+

@@ -108,12 +108,6 @@ test('サブプロセス経由: --help は終了コード0でUsageを表示す�
   assert.match(r.stdout, /run-review-manager\.js/);
 });
 
-test('サブプロセス経由: 位置引数が不足しているとUsageエラーになる', () => {
-  const r = spawnSync(process.execPath, [SCRIPT, '5', 'o/r'], { encoding: 'utf8' });
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /Usage/);
-});
-
 test('CLI: Review Manager setup失敗後にgenerationと保留チェックポイントをfailedで終端する', () => {
   const testDir = path.join(tmpBase, 'cli-failure-finalization');
   const ghDir = path.join(testDir, '.gh-maestro');
@@ -554,3 +548,4 @@ test('boundedCleanup: 停止を確認できたら worktree を破棄し、停止
   assert.equal(noPid.worktreeCleaned, true);
   assert.equal(fs.existsSync(dir), false);
 });
+

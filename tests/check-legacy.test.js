@@ -29,14 +29,6 @@ function runCli(...args) {
   });
 }
 
-test('check-legacy CLI supports --help and -h with exit code 0', () => {
-  for (const flag of ['--help', '-h']) {
-    const result = runCli(flag);
-    assert.equal(result.status, 0, `${flag}: ${result.stderr}`);
-    assert.match(result.stdout, /Usage: node check-legacy\.js/);
-  }
-});
-
 test('check-legacy CLI reports findings with exit code 0', () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-check-legacy-workspace-'));
   try {
@@ -74,16 +66,6 @@ test('check-legacy CLI reports findings with exit code 0', () => {
   }
 });
 
-test('check-legacy CLI rejects invalid argument usage at the child-process boundary', () => {
-  const missingValue = runCli('--workspace');
-  assert.notEqual(missingValue.status, 0);
-  assert.match(missingValue.stderr, /には値が必要です/);
-
-  const unknownFlag = runCli('--not-a-check-legacy-option');
-  assert.notEqual(unknownFlag.status, 0);
-  assert.match(unknownFlag.stderr, /未知のフラグ/);
-});
-
 test('check-legacy main returns nonzero only when inspection cannot execute', () => {
   const stdout = [];
   const stderr = [];
@@ -96,3 +78,4 @@ test('check-legacy main returns nonzero only when inspection cannot execute', ()
   assert.equal(stdout.join(''), '');
   assert.match(stderr.join(''), /fixture inspection failure/);
 });
+

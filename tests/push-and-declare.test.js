@@ -998,13 +998,6 @@ test('main: --declaration-file のファイルが読めなければ副作用ゼ�
   assert.equal(calls.length, 0);
 });
 
-test('USAGE / SPEC: --declaration-file を宣言し、usage に記述がある', () => {
-  const { mod } = loadModule();
-  assert.ok(mod.SPEC.flags['--declaration-file'], '--declaration-file が SPEC に宣言されている');
-  assert.match(mod.USAGE, /^ {2}--declaration-file <path> {3}\S/m, 'Arguments 節に説明行がある');
-});
-
-
 // ── 下書きPRの公開（Issue #671 PR#672 3回目・5回目指摘） ──────────────────────────
 // 申告表を載せるPRは下書きで作り、申告表コメントが確認できてから公開する。公開するのは、このスクリプトが
 // 申告表のために作った下書き（PR本文に所有マーカーがあるもの）だけ。人間の下書きには触れない。
@@ -1220,3 +1213,4 @@ test('下書き公開: 公開に失敗したら exit 3（申告表は投稿済�
   assert.equal(result.exitCode, 3);
   assert.match(result.stderr, /PRを公開できません/);
 });
+

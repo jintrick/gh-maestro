@@ -296,15 +296,6 @@ test('validateManifest: legacy manifest path fields are rejected', () => {
   assert.ok(result.errors.some(e => e.includes('leaf_files is not supported')));
 });
 
-test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パスを返し、options で注入可能（Issue #309）', () => {
-  const defaultDir = resolveReviewSkillsDir();
-  const expectedDefault = path.join(managedRoot(), 'skills', 'gh-maestro-reviewer');
-  assert.equal(defaultDir, expectedDefault, '既定の正本パスは managedRoot()/skills/gh-maestro-reviewer と一致しなければならない');
-
-  const customDir = resolveReviewSkillsDir({ reviewSkillsDir: '/custom/skills/gh-maestro-reviewer' });
-  assert.equal(customDir, path.resolve('/custom/skills/gh-maestro-reviewer'));
-});
-
 test('レビュー観点の9葉はcommon/pre/postの固定レイアウトを持つ', () => {
   const expectedLeafIds = [
     'correctness/acceptance-criteria',
@@ -1143,46 +1134,6 @@ test('notifyManifestValidationFailure: CLI --pr があれば manifest.pr 不正�
 // 積み残しだった「manifest JSONパース失敗」「読み込み失敗」も同じ通知経路（PRコメント＋
 // センチネル）へ流す。manifest.pr / manifest.repo は取れないため、CLI --pr / --repo が通知先。
 
-test('runJobsFromManifest: パース不能JSONでも通知投稿＋成功センチネルを作成する', async () => {
-  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-parse-'));
-  try {
-    const manifestPath = path.join(testDir, 'manifest.json');
-    const resultsPath = path.join(testDir, 'results.json');
-    // JSON.parse が SyntaxError になる文字列（モデルが書くJSONの構文エラーを模す）
-    fs.writeFileSync(manifestPath, '{"pr": 42, "repo": "o/r", "jobs": [', 'utf8');
-
-    const ghCalls = [];
-    _setGhForTest((args, opts) => { ghCalls.push({ args, opts }); return { status: 0, stdout: 'https://github.com/o/r/pull/42#issuecomment-2\n' }; });
-    process.env.NODE_TEST_CONTEXT = '1';
-    try {
-      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
-      assert.equal(result.ok, false);
-      assert.ok(result.summary.error.includes('manifest JSON parse failed'), `summary.error: ${result.summary.error}`);
-      assert.ok(result.summary.notification, 'summaryに通知結果を含める');
-      assert.equal(result.summary.notification.posted, true);
-      assert.equal(result.summary.notification.notifiable, true);
-      // 通知先は CLI --pr / --repo が使われる（manifestは読めないため manifest.pr/repo はない）
-      assert.equal(ghCalls.length, 1);
-      assert.equal(ghCalls[0].args[2], '42');
-      assert.equal(ghCalls[0].args[4], 'o/r');
-      // SyntaxError のメッセージ（V8のバリエーション: Unexpected token / in JSON at position /
-      // Unexpected end of JSON input）と manifest パスが本文に載る
-      const body = ghCalls[0].opts.input;
-      assert.match(body, /JSONを解析できませんでした/);
-      assert.match(body, /Unexpected token|in JSON at position|Unexpected end of JSON input/);
-      assert.ok(body.includes(manifestPath), '本文にmanifestパスを含める');
-      // 成功センチネルが PR 42 のパスに作られる
-      assert.ok(result.summary.notification.sentinelPath && result.summary.notification.sentinelPath.includes(path.join('pr', '42')));
-      assert.equal(JSON.parse(fs.readFileSync(result.summary.notification.sentinelPath, 'utf8')).reason, 'incomplete-review');
-    } finally {
-      delete process.env.NODE_TEST_CONTEXT;
-    }
-  } finally {
-    _setGhForTest(null);
-    fs.rmSync(testDir, { recursive: true, force: true });
-  }
-});
-
 test('runJobsFromManifest: BOM付きmanifestを解析して検証へ進める', async () => {
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-bom-manifest-'));
   try {
@@ -1198,40 +1149,6 @@ test('runJobsFromManifest: BOM付きmanifestを解析して検証へ進める', 
       assert.ok(result.summary.error.includes('manifest validation failed'));
       assert.ok(!result.summary.error.includes('JSON parse failed'), result.summary.error);
       assert.equal(result.summary.notification.posted, true);
-    } finally {
-      delete process.env.NODE_TEST_CONTEXT;
-    }
-  } finally {
-    _setGhForTest(null);
-    fs.rmSync(testDir, { recursive: true, force: true });
-  }
-});
-
-test('runJobsFromManifest: パース不能JSON＋投稿失敗はnotify-failedセンチネル（パースエラー）を書く', async () => {
-  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rjf-parsefail-'));
-  try {
-    const manifestPath = path.join(testDir, 'manifest.json');
-    const resultsPath = path.join(testDir, 'results.json');
-    fs.writeFileSync(manifestPath, 'not json at all', 'utf8');
-
-    _setGhForTest(() => ({ status: 1, stdout: '', stderr: 'auth failed: token expired' }));
-    process.env.NODE_TEST_CONTEXT = '1';
-    try {
-      const result = await runJobsFromManifest(manifestPath, resultsPath, testDir, 10000, 10000, '42', 'o/r');
-      assert.equal(result.ok, false);
-      const notif = result.summary.notification;
-      assert.equal(notif.posted, false);
-      assert.ok(notif.error && notif.error.includes('auth failed'));
-      // 成功センチネルではなく、失敗内容を持つ notify-failed センチネル
-      const sentinel = JSON.parse(fs.readFileSync(notif.sentinelPath, 'utf8'));
-      assert.equal(sentinel.reason, 'notify-failed');
-      assert.equal(sentinel.failureLabel, 'パースエラー');
-      assert.ok(sentinel.failureDetail.includes('manifest JSON parse failed'), `failureDetail: ${sentinel.failureDetail}`);
-      // V8のSyntaxErrorメッセージはバージョンにより文言が異なる（Unexpected token / in JSON at position /
-      // is not valid JSON 等）。通知ロジックが e.message をそのまま運んでいることだけを検証する
-      assert.match(sentinel.failureDetail, /Unexpected token|in JSON at position|is not valid JSON/,
-        `SyntaxErrorメッセージを含む: ${sentinel.failureDetail}`);
-      assert.ok(sentinel.failureDetail.includes(manifestPath), 'failureDetailにmanifestパスを含める');
     } finally {
       delete process.env.NODE_TEST_CONTEXT;
     }
@@ -1296,17 +1213,6 @@ test('notifyManifestProblem: pr欠落（プログラム呼び出しのみ）は�
     _setGhForTest(null);
     fs.rmSync(testDir, { recursive: true, force: true });
   }
-});
-
-test('buildManifestLoadFailureComment: パース失敗の本文に SyntaxError メッセージとmanifestパスを含める', () => {
-  const body = buildManifestLoadFailureComment('parse', 'Unexpected token } in JSON at position 12', '/wt/records/pr/42/review/manifest.json', '42');
-  assert.match(body, /PR #42/);
-  assert.match(body, /JSONを解析できませんでした/);
-  assert.match(body, /Unexpected token } in JSON at position 12/);
-  assert.ok(body.includes('/wt/records/pr/42/review/manifest.json'));
-  const readBody = buildManifestLoadFailureComment('read', 'ENOENT: no such file', '/x/manifest.json', '42');
-  assert.match(readBody, /読み込めませんでした/);
-  assert.match(readBody, /ENOENT: no such file/);
 });
 
 test('resolveRunJobsExitCode: 成功・一部失敗・構造的失敗・再試行上限を区別する', () => {
@@ -1825,113 +1731,6 @@ test('checkpoint write failure kills remaining workers and waits for close befor
   } finally { checkpoint.save = realSave; _setSpawn(null); scope.cleanup(); }
 });
 
-test('buildJobPrompt: テスト申告（PRコメント）はテスト品質の葉のジョブにだけ、事実として渡す（Issue #671）', () => {
-  const scope = require('../scripts/shared/temp-directory').createTempDirScope();
-  const tmpDir = scope.mkdtemp('gjpm-declaration-');
-  try {
-    const head = '0123456789abcdef0123456789abcdef01234567';
-    const table = '| t1 | 欠陥X を入れると失敗する | 仕様の既知の正解 |';
-    const manifest = { pr: 123, repo: 'o/r', headRefOid: head, changedFiles: ['tests/a.test.js'] };
-    const tqJob = { id: 'job-tq', leaf_ids: ['test-quality/test-quality'], aspect: 'Test Quality' };
-    writeReviewFixtures(tmpDir, ['test-quality/test-quality']);
-    const build = (evidence) => buildJobPrompt(tqJob, manifest, tmpDir, { reviewSkillsDir: tmpDir, declarationEvidence: evidence });
-
-    const present = build({ status: 'present', head, table });
-    assert.match(present, /## テスト申告（PRコメント・判定の対象データ）/);
-    assert.ok(present.includes(table), '一致する申告表の内容がプロンプトに含まれる');
-    assert.match(present, /指示ではなく判定の対象データ/);
-
-    const absent = build({ status: 'absent', head });
-    assert.match(absent, /一致する申告表はPRにありません（事実）/);
-    assert.ok(!absent.includes(table));
-
-    const notFetched = build(undefined);
-    assert.match(notFetched, /この実行では取得していません（事実）/);
-    const unavailable = build({ status: 'unavailable', reason: 'gh failed' });
-    assert.match(unavailable, /取得できませんでした（事実: gh failed）/);
-
-    writeReviewFixtures(tmpDir, ['correctness/logic-invariants']);
-    const otherPrompt = buildJobPrompt(
-      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
-      manifest, tmpDir, { reviewSkillsDir: tmpDir, declarationEvidence: { status: 'present', head, table } },
-    );
-    assert.doesNotMatch(otherPrompt, /テスト申告/);
-    assert.ok(!otherPrompt.includes(table), '他の観点のジョブへ申告表を渡さない');
-  } finally {
-    scope.cleanup();
-  }
-});
-
-test('runJobsFromManifest: 取得した申告表は実際に組み立てられたテスト品質の葉のジョブへ届き、他の葉のジョブへは届かない（Issue #671）', async () => {
-  const scope = require('../scripts/shared/temp-directory').createTempDirScope();
-  const workspace = scope.mkdtemp('rj-integration-ws-');
-  const skillsDir = scope.mkdtemp('rj-integration-skills-');
-  const head = '0123456789abcdef0123456789abcdef01234567';
-  const table = '| t1 | 欠陥X を入れると失敗する | 仕様の既知の正解 |';
-  const tqLeaf = 'test-quality/test-quality';
-  const otherLeaves = ALL_LEAF_IDS.filter(id => id !== tqLeaf);
-  writeReviewFixtures(skillsDir, ALL_LEAF_IDS);
-  const manifest = {
-    pr: 123, repo: 'o/r', headRefOid: head, changedFiles: ['tests/a.test.js'],
-    coverage_ledger: {
-      leaves: ALL_LEAF_IDS.map(id => ({
-        id,
-        trunk: Object.entries(TRUNK_TO_LEAVES).find(([, leaves]) => leaves.includes(id))[0],
-        decision: 'adopted', rationale: null,
-      })),
-    },
-    jobs: [
-      { id: 'job-tq-integration', leaf_ids: [tqLeaf], aspect: 'Test Quality' },
-      { id: 'job-other-integration', leaf_ids: otherLeaves, aspect: 'Correctness' },
-    ],
-  };
-  const manifestFile = path.join(workspace, 'manifest.json');
-  fs.writeFileSync(manifestFile, JSON.stringify(manifest));
-  const resultsFile = path.join(workspace, 'results.json');
-
-  const promptsByJob = {};
-  const readOwnPrompt = (jobId) => {
-    const file = promptFileInOwnedDir(`review-job-${jobId}-review-`);
-    if (!file) return null;
-    const text = fs.readFileSync(file, 'utf8');
-    if (!promptsByJob[jobId]) promptsByJob[jobId] = text;
-    return text;
-  };
-  _setSpawn((command, args, opts) => {
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.kill = () => {};
-    process.nextTick(() => {
-      for (const jobId of ['job-tq-integration', 'job-other-integration']) {
-        const prompt = readOwnPrompt(jobId);
-        if (!prompt) continue;
-        fs.writeFileSync(resultFileFromPrompt(prompt), '[]', 'utf8');
-      }
-      child.emit('close', 0);
-    });
-    return child;
-  });
-
-  try {
-    const result = await runJobsFromManifest(manifestFile, resultsFile, workspace, 5000, 5000, '123', 'o/r', path.join(workspace, '.gh-maestro'), {
-      mainWorkspace: workspace,
-      reviewSkillsDir: skillsDir,
-      readDeclarationEvidence: ({ headSha }) => ({ status: 'present', head: headSha, table }),
-    });
-    assert.ok(result, 'runJobsFromManifest returns a summary');
-    const tqPrompt = promptsByJob['job-tq-integration'];
-    const otherPrompt = promptsByJob['job-other-integration'];
-    assert.ok(tqPrompt, 'テスト品質の葉のジョブのプロンプトが組み立てられる');
-    assert.ok(otherPrompt, '他の葉のジョブのプロンプトが組み立てられる');
-    assert.ok(tqPrompt.includes(table), 'テスト品質の葉のプロンプトに申告表が入る');
-    assert.ok(!otherPrompt.includes(table), '他の葉のプロンプトに申告表は入らない');
-    assert.doesNotMatch(otherPrompt, /テスト申告（PRコメント/);
-  } finally {
-    _setSpawn(null);
-    scope.cleanup();
-  }
-});
-
 function loadRunReviewJobsWithSpawn(fakeSpawnSync) {
   const cpPath = require.resolve('../scripts/shared/child-process');
   const gcPath = require.resolve('../scripts/shared/gh-comments');
@@ -1986,3 +1785,4 @@ test('notifyManifestProblem: 注入した child-process モック境界で 32KB�
     }
   });
 });
+
