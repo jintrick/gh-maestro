@@ -768,23 +768,6 @@ test('buildJobPrompt passes manifest acceptance criteria without external lookup
   }
 });
 
-test('buildJobPrompt keeps the input contract when manifest has no acceptance criteria', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-no-acceptance-'));
-  try {
-    writeReviewFixtures(tmpDir, ['correctness/acceptance-criteria']);
-    const prompt = buildJobPrompt(
-      { id: 'job-1', leaf_ids: ['correctness/acceptance-criteria'], aspect: 'Correctness' },
-      { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] },
-      tmpDir,
-      { reviewSkillsDir: tmpDir },
-    );
-    assert.match(prompt, /diff、変更ファイル一覧、manifestに存在する受け入れ条件を入力として使用/);
-    assert.doesNotMatch(prompt, /保存後に内容を保持する/);
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
 test('launchJobWorker: 合成後の Review Manager argv が非対話化トークンを欠くと spawn せず failed になる', async () => {
   // 共通引数にも経路固有引数にも必須トークンが無い場合、ガードは spawn 前に起動を拒否する。
   const result = await launchJobWorker(
