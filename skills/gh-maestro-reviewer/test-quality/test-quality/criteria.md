@@ -5,11 +5,13 @@
 良いテストには、互いに対等な二つの軸がある。
 
 - **振る舞いへの感度**。契約に反する振る舞いの誤りがあれば失敗する。これは Khorikov の「退行からの保護」と Beck の「Behavioral」に対応する。[Khorikov 第4章](https://www.manning.com/books/unit-testing) · [Test Desiderata](https://testdesiderata.com/)
-- **振る舞いを保つ変更への耐性**。外から見える振る舞いが同じまま実装の構造を変えても成功する。これは Khorikov の「リファクタリングへの耐性」と Beck の「Structure-insensitive」に対応する。[Khorikov 第4章](https://www.manning.com/books/unit-testing) · [Test Desiderata](https://testdesiderata.com/)
+- **振る舞いを保つ変更への耐性**。外から見える振る舞いが同じまま実装の構造を変えても成功する。これは Khorikov の「リファクタリング耐性」と Beck の「Structure-insensitive」に対応する。[Khorikov 第4章](https://www.manning.com/books/unit-testing) · [Test Desiderata](https://testdesiderata.com/)
 
-どちらか片方だけではテストの価値を示せない。内部構造が変わるたびに失敗するテストは、正しい変更も妨げてテスト結果への信頼を損なう。構造変更に耐えても、契約違反を見逃すテストは欠陥から守らない。Khorikov はこの二つをテスト価値の主要な属性として説明し、Beck は振る舞いの変化への感度と構造変更への鈍感さを別の望ましい性質として挙げている。
+どちらか片方だけではテストの価値を示せない。内部構造が変わるたびに失敗するテストは、正しい変更も妨げてテスト結果への信頼を損なう。構造変更に耐えても、契約違反を見逃すテストは欠陥から守らない。
 
 テストは対象の契約を検証する。契約には、公開 API の戻り値、利用者から観測できる状態変化、要求されるエラーや副作用、安全性・性能などの要件を含む。仕様が明示的に保証する呼び出しや値も検証してよい。
+
+テストを追加・変更するときは、検出したい欠陥が重要な契約や現実的なリスクに関わるか、既存テストが同じ欠陥をすでに捉えているか、その追加の保護に実行・理解・保守の負担が見合うかを先に判断する。欠陥を検出できることだけでは、専用テストを残す理由にならない。この価値判断は、Khorikov の四本柱、Beck の Test Desiderata、Google の「Tests Must Earn Their Keep」、Fowler の Practical Test Pyramid にある保護価値・変更耐性・実行負担・保守性の考え方に沿う。[Khorikov 第4章](https://www.manning.com/books/unit-testing) · [Test Desiderata](https://testdesiderata.com/) · [Software Engineering at Google 第11〜13章](https://abseil.io/resources/swe-book) · [The Practical Test Pyramid](https://martinfowler.com/articles/practical-test-pyramid.html)
 
 テスト件数、コードカバレッジ、アサーション数、成功率の増加を目的化しない。テストを追加しないことも、適切な技術的判断である。
 
@@ -21,7 +23,7 @@
 
 1. **検出対象が不明確**
    - どの契約違反や不具合を検出するのか説明できない。
-   - 何が壊れたら失敗するのか特定できない。
+   - 何が壊れたら失敗するか特定できない。
 
 2. **意味のある検証が存在しない**
    - 処理を呼び出すだけで、必要な結果を検証していない。
@@ -102,9 +104,29 @@
 
 これらの条件は、Khorikov の退行保護・リファクタリング耐性・迅速なフィードバック・保守性、Beck の Behavioral・Structure-insensitive・Fast・Readable・Specific、および Meszaros の Conditional Test Logic・Assertion Roulette などの test smell を、レビューで確認できる判定へ落としたものである。
 
-## 3. gh-maestro 新規テスト採用基準
+## 3. 新しいテストの採用基準
 
-新規テストは、以下の4条件をすべて満たす場合に採用する。
+新規テストは、まず基準4で追加する価値を確認し、その価値が認められる場合に基準1〜3も含む4条件をすべて満たすときに採用する。既存テストを変更するときも、変更後に守る契約と維持価値を同じ基準で確かめる。
+
+### 基準4：追加・維持する価値がある
+
+- 守る契約と、違反が起きた場合の影響・起こりやすさを確認する。重大な安全性やデータ整合性の違反は、発生頻度が低いというだけで価値を低く見積もらない。
+- 既存テストが同じ故障条件を検出するか、追加テストが固有の検出能力をもたらすかを確かめる。
+- 実行時間、環境依存性、読みやすさ、修正頻度、誤検知対応を含む負担が、期待する追加の保護に見合う。金額や数値の計算を要求せず、差分・契約・既存テストから根拠を示して判断する。
+- 守る契約の根拠は、Issue要件・公開仕様・利用者向け文書・既知の不具合など、対象コードとテストから独立した資料で確かめる。テスト名・申告・現行実装だけで期待動作を定めない。独立した根拠や具体的な影響がなく、固有の検出価値も示せない欠陥は、テストを強化する理由にしない。
+- Issueや仕様を根拠にするとき、その記述が対象コンポーネントと評価中の観測可能な結果を実際に規定するか確かめる。目的や用語が近いだけでは、個別の下流動作や内部境界の契約を作らない。
+- 要件が構成、責務分担、情報の流れなどを定めていても、それだけで未記載の利用者向け動作まで契約として確定するとは限らない。期待する動作と影響が独立した根拠にあるか確認し、設計条件や実装経路だけから補わない。
+- 入力検証や型がある状態を受け入れることは、その後の出力や副作用に対する契約を自動的に含意しない。入力領域の定義と、下流で求める観測可能な結果を別々に確かめる。
+- 検出対象とする欠陥は、実際の入力、処理、依存関係から起きる経路を示せるものに結び付ける。単なる仮想的な不具合や影響を想定して、範囲の狭いアサーションを強化・維持する根拠にしない。重大なリスクを主張する場合は、その経路と影響を独立資料または実際の構造で確認する。
+- テストfixtureが特定の状態を作ることや、対象コードがその状態を処理することだけで、未規定の状態に対する既定の振る舞いを契約とみなさない。独立した根拠がその動作を要求し、故障に意味のある影響があるかを確かめる。
+- 一つの具体例に対するアサーションが直接検証するのは、その例で区別される振る舞いまでである。そこからより広い性質への保証を読み込まず、その動作自体が独立した契約で要求され、故障に意味のある影響があるかを確かめる。
+- 申告された欠陥・契約と、実際のアサーションが区別する振る舞いを照合する。テストが検出しない広い欠陥を、そのテストの価値や強化理由の根拠にしない。
+- 実装上の経路を通ることだけは独自の保護を意味しない。各テストがどの外部契約を検証するかを確かめ、独自の検出価値が契約上確認できない場合は、架空の保証を補って強化せず、統合または削除を検討する。
+- 廃止された契約だけを固定するテスト、同じ欠陥を検出する既存テストがあり追加保護のないテスト、重要でない自明な処理だけのテスト、実装詳細の変更ごとに保守を要する一方で契約違反を検出しないテストは、追加・維持する価値がない候補である。
+
+設計上の記述と外部契約を区別し、振る舞いを保つ変更への耐性を確かめる考え方は、Khorikov の退行保護・リファクタリング耐性、Beck の Behavioral・Structure-insensitive、Software Engineering at Google の Tests Must Earn Their Keep と Change-Detector Test、Meszaros の Fragile Test に沿う。費用対効果は Fowler の Practical Test Pyramid も参照する。参照先は本基準末尾の出典を参照する。
+
+価値が見合わない新規テストは追加しない。既存のテストについても、修正・統合・削除を判断できる。
 
 ### 基準1：検証目的が明確
 
@@ -125,29 +147,27 @@
 
 必要に応じてミューテーション確認などで検出能力を確かめる。ただし、すべてのテストに義務付けない。実施範囲は `docs/adr/0060-mutation-check-scope-limited.md` に従う。
 
-### 基準4：追加する価値がある
+## 4. 判断と処置
 
-- 既存テストで十分に検証されていない独自の検出能力、または合理的な検証上の利点がある。
-- 外から見える振る舞いが同じまま内部構造や実装表現を変えても、正当な理由なく失敗しない。
-- 期待する保護に対して、実行時間、環境依存性、理解や保守の負担が見合う。
+問題が見つかったテストを自動的に強化するのではなく、独立した契約、検出価値、既存テストの担保範囲、維持負担に応じて処置を決める。
 
-**4条件のいずれかを満たさない新規テストは、原則として作成しない。**
+- 重要な契約に固有の保護を与えるテストで検出方法が不十分なら、その契約と独立した期待値を保つ形に書き直すか強化する。
+- アサーションの検出範囲が不足している場合も、範囲を広げる提案の前に、拡張先の振る舞いが独立した契約として示され、追加の保護が負担に見合うかを判断する。既存テストの存在や弱いアサーションだけを根拠に、検出範囲を拡張してテストを延命しない。
+- 同じ故障を捉える既存テストがあり、別テストが追加する条件や異なる信頼性上の利点がないなら、既存テストへ統合するか重複分を削除する。統合後も、重要な条件と失敗理由が読み取れることを確かめる。
+- 契約が廃止されている、検出対象が自明で重要なリスクに結び付かない、または維持負担に見合う追加保護がない場合は、既存テストを削除し、新しいテストは追加しない。
+- 独自の保護がないと判断した理由と、既存テストまたは契約状況のどの事実がその結論を支えるかを示す。削除を指摘するときは、対象テストと重複先または廃止された契約を特定する。
+- 重要な契約を唯一検証するテストは、数を減らす目的で削除しない。重複を統合する場合も、安全性、永続化、重要なエラーなどの独自の保証を失わないようにする。
 
-## 4. 判定時の境界
+変更検知テストの判定では、テストが固定する実装詳細、振る舞いを保つ変更で失敗する理由、外部契約違反を検出するかを示す。特定の表現を使うことだけでは change-detector としない。契約上求められる相互作用や値は検証してよい。期待値が独立した根拠に基づき、契約に沿う入力に対する観測可能な結果を検査するテストを、定数・表・モック・データ駆動という形式だけで退けない。
 
 - 起動失敗やクラッシュを検出するスモークテストには価値がある。
 - モックの使用自体は問題ではない。検証対象のロジックを実行し、外部依存を隔離するためのモックは有効である。
 - 戻り値、保存後の状態、利用者から観測できるエラーや副作用を検証するテストは、入力が仕様に沿い、期待値が独立していれば振る舞いを検証している。
-- 契約が特定の順序、呼び出し回数、選択肢、定数、メッセージを利用者への約束として明示するなら、その契約を確かめてよい。実装ソースから値や文言を写したというだけでは、独立した期待値にならない。
-- 定義表、選択肢一覧、内部文字列、文書文言がテストに現れるだけで change-detector と判定しない。契約上の根拠、テストが与える入力、外から観測する結果を確認する。
-- テストにモックがあるだけで、相互作用テストや change-detector と判定しない。何を契約として検証するのか、相互作用以外に何を観測しているかを確認する。
-- 条件分岐やループがテストコードにあるだけで指摘しない。読解を妨げるテスト独自の複雑な判定ロジックが、検証の正しさや失敗原因を不明瞭にしているかを示す。
-- 正常系・境界値・異常系は、同じ対象でも検出する欠陥が異なれば重複とはみなさない。
 - 内部動作の検証でも、重要な不変条件、安全性、性能、または明記された副作用の契約に必要なら有効である。
 - 不安定さだけを理由に、必要な統合テストや耐障害性テストを不要とは判断しない。
 - 仕様の変更が正当に確認された場合は、根拠に合わせて期待値を更新してよい。
-- テストの削減自体を目的化しない。有効なテストを数合わせで削除してはならない。
-- Test Quality レビューはテストを実行しない。判断は差分、コード、入力、独立した期待値、参照資料を読んで行う。`docs/adr/0066-reviewer-runs-no-tests.md` に従う。
+- テストの削減自体を目的化しない。有効で独自の保護を持つテストを、件数やカバレッジを減らすためだけに削除してはならない。
+- Test Quality レビューはテストを実行しない。判断は差分、コード、入力、独立した期待値、参照資料を読んで行う。docs/adr/0066-reviewer-runs-no-tests.md に従う。
 
 ## 5. gh-maestro 固有のレビュー条件
 
@@ -170,8 +190,9 @@
 
 ## 出典
 
+- Martin Fowler, “The Practical Test Pyramid”, テストの分類と維持コストを踏まえた構成・削減判断 [martinfowler.com](https://martinfowler.com/articles/practical-test-pyramid.html)
 - Vladimir Khorikov, *Unit Testing Principles, Practices, and Patterns*, 第4章「The four pillars of a good unit test」と第5章「Mocks and test fragility」 [Manning](https://www.manning.com/books/unit-testing)
 - Kent Beck, “Test Desiderata”, Behavioral・Structure-insensitive・Readable・Specific などの特性 [Test Desiderata](https://testdesiderata.com/)
-- *Software Engineering at Google*, 第12章「Unit Testing」と第13章「Test Doubles」 [Chapter 12](https://abseil.io/resources/swe-book/html/ch12.html) · [Chapter 13](https://abseil.io/resources/swe-book/html/ch13.html)
+- *Software Engineering at Google*, 第11〜13章「Testing Overview」「Unit Testing」「Test Doubles」 [書籍](https://abseil.io/resources/swe-book) · [Chapter 12](https://abseil.io/resources/swe-book/html/ch12.html) · [Chapter 13](https://abseil.io/resources/swe-book/html/ch13.html)
 - Alex Eagle, “Testing on the Toilet: Change-Detector Tests Considered Harmful” [Google Testing Blog](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html)
-- Gerard Meszaros, *xUnit Test Patterns: Refactoring Test Code*, Fragile Test、Conditional Test Logic、Assertion Roulette など [xUnit Test Patterns](http://xunitpatterns.com/)
+- Gerard Meszaros, *xUnit Test Patterns: Refactoring Test Code*, Fragile Test、Conditional Test Logic、Assertion Roulette、Obsolete Test など [xUnit Test Patterns](http://xunitpatterns.com/)
