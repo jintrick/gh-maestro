@@ -84,22 +84,26 @@ node "{{SCRIPTS_PATH}}/start-review-manager.js" --prior-findings-file <前回の
 
 #### 7-[5/6] マージ判断の依頼【必須】
 
-`REVIEW_MANAGER_STARTED` は起動シグナルで、レビュー完了ではない。人間にマージ候補として提示してよいのは次の条件を満たすときだけである。提示は `工程7-[5/6]` と名乗り、Review Managerのレビュー結果、テスト申告、CI checksを判断材料として示す。7-[3/6]を実施した場合はtriage結果も示し、該当する場合はPRのbase違いと結果を取得できなかった項目も示す。マージ判断の問いは「人間への発言の規範」に従う。修正pushがあった場合は、pushごとに7-[4/6]で選んだもの（再レビュー・事実確認・どちらもしない）と理由を1行ずつ示す。
+受け入れ条件を満たしていると分かるまで、人間にマージの判断を求めない。照合するのはCorrectnessの `correctness/acceptance-criteria` であり、orchestratorは自分で照合せず結果を読み取る。マージ候補として提示してよいのは、次をすべて満たすときだけである。
+
+- **レビュー完了**: `PR_REVIEW:...Posted inline findings: N` の到着、または `<workspace>/.gh-maestro/records/pr/<PR>/review/manager.json` の生成。`REVIEW_MANAGER_STARTED` と不完全レビューは完了ではない。
+- **受け入れ条件の照合**: 同じディレクトリの `manifest.json` に `acceptanceCriteria` があり、`coverage_ledger` で `correctness/acceptance-criteria` が `adopted`。Issueに受け入れ条件があるのにこれを満たさなければ照合されていないので、提示せずその事実を人間に示す。
+- **BLOCKERゼロ**: 受け入れ条件の未達を含むBLOCKERが無い。findingsは1問題×3観点で重複するのでクラスタでtriageする。転送済みBLOCKER/MAJORは、修正pushへのexplorerの事実確認か再レビューが済むまで未解消とする。
+
+提示は `工程7-[5/6]` と名乗り、受け入れ条件の照合結果、レビュー結果、テスト申告、CI checksを示す。7-[3/6]を実施した場合はtriage結果、該当すればbase違いと取得できなかった項目、修正pushがあればpushごとに7-[4/6]で選んだものと理由を1行で示す。問いは「人間への発言の規範」に従う。
 
 提示前に `node "{{SCRIPTS_PATH}}/review-threads.js" status --pr <PR> --repo $REPO` を実行し、未解決threadの全件数とReview Manager分を示す。取得失敗は0件扱いせず、人間に伝える。
 
-- Review Manager 完了（`PR_REVIEW:...Posted inline findings: N` 到着 or `<workspace>/.gh-maestro/records/pr/<PR>/review/manager.json` 生成）
-- 完了 findings を triage 済みで BLOCKER ゼロ（findings は 1 問題×3 観点で重複するのでクラスタで triage。転送済み BLOCKER/MAJOR は、修正 push に対する explorer の事実確認、または再レビューが完了するまで未解消として扱う）
+テスト申告とCI checksは、次のとおり確認して事実を示す。
 - **テスト申告状態の確認と事実提示（Issue #209）**:
   - `node "{{SCRIPTS_PATH}}/query-test-status.js" --pr <PR>` を実行し、成功時に返るJSON 1行をテスト申告状態の正本として確認する。このコマンドは現在のPRコメントとHEADをGitHubから取得するため、`poll-reviews.js` の内部状態ファイルや「新しいコメントがあるか」の推測を使わない。
-  - JSONの `status` は、`GREEN` が申告あり・SHA一致・fail 0、`RED` が申告あり・SHA一致・fail > 0、`STALE` がSHA不一致、`NONE` が申告なしまたは照合不能を表す。`lint.status` は `complete`（`outcome=pass` または `findings` と `findingCount`）、`unavailable`、`missing` のいずれか。`typecheck.status` は `complete`（`outcome=pass/fail` と `exitCode`）、`unavailable`、`undefined`、`missing` のいずれか。いずれも `unavailable`/`missing` を状態のない GREEN と読み替えてはならない。lint の指摘と型チェック結果は commit・push・PR作成・merge の機械停止条件ではなく、止めるかどうかは orchestrator と人間が判断する。
+  - `status`・`lint`・`typecheck` の値の意味は `query-test-status.js --help` に従う。`STALE` はSHA不一致、`NONE` は申告なしまたは照合不能である。`unavailable`/`missing` を状態のない GREEN と読み替えない。lint と型チェックの結果は機械停止条件ではなく、止めるかは orchestrator と人間が判断する。
   - コマンドが非0終了した場合は、状態を `NONE` と取り違えず、テスト申告状態を照会できなかった事実を提示する。
 - **GitHub CI checksの確認と事実提示**:
   - 通常経路PRでは `node "{{SCRIPTS_PATH}}/query-pr-checks.js" --pr <PR> --repo $REPO` を実行し、現在のHEADに紐づくcheck runsとcommit statusesを照会する。成功時はJSONの `headSha` と各checkの名前・状態・詳細URLをテスト申告と並べて提示する。軽量PRではGitHub CI checksを照会・通知しない。
   - `hasChecks=false` はチェックなし、`hasRunning=true` は実行中、`allCompleted=true` は全件完了を表す。`hasRunning=true` の間は merge 候補として提示せず、`CI_CHECKS_COMPLETE` または `CI_CHECK_FAILED` を受けてから結果を提示する。`hasChecks=false`（`CI_CHECKS_EMPTY`）は待たずに提示する。
   - コマンドが非0終了した場合は、CI状態を取得できなかった事実を提示する。チェックなし・成功として扱わない。
-  - CI失敗と今回の変更との関連性を推測したり、「無関係」等の独自解釈を加えたりしない。CIの状態は機械的なマージ条件ではなく、止めるかどうかの最終判断は人間に委ねる。
-  - **「無関係なテスト失敗だから」「今回は影響ないから」といった関係有無の判断や独自解釈を orchestrator が挟むことは禁止**。申告された事実（対象コミットSHA、fail件数、pass件数、失敗したテスト名と超過件数）をそのまま伝える。マージするかどうかの最終判断は人間に委ねる。
+  - テストやCIの失敗と今回の変更との関係を推測しない。「無関係」「影響ない」等の独自解釈を挟まず、申告された事実（対象コミットSHA、fail件数、pass件数、失敗したテスト名と超過件数）をそのまま伝える。テストとCIの状態は機械的なマージ条件ではなく、止めるかどうかは人間が決める。
   - devの健全性確認やテスト障害の調査でslow層を全件実行する場合は、`node "{{SCRIPTS_PATH}}/run-slow-tests.js" --workspace $WORKSPACE` を使う。対象指定なしで宣言済みslow層を実行し、結果は通常のテスト成果物と同じruntime rootへ保存する。slow層に `dynamicConcurrency` が宣言されていれば、起動時の並列数と計算入力も記録される。`npm run test:slow` はコーダー経路のため、この用途には使わない。
 
 #### 7-[6/6] 誤ってマージしてしまった場合の対処【任意】
