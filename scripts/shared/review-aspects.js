@@ -1,5 +1,5 @@
 'use strict';
-// review-aspects.js — Review Managerのレビュー基準（8葉）と幹（4幹）の定義
+// review-aspects.js — Review Managerのレビュー基準（9葉）と幹（4幹）の定義
 //
 // run-review-jobs.js / finalize-review.js 等から共有参照される単一の正規定義。
 // 将来葉や幹を変更する際はこのファイルだけを更新する。
@@ -8,6 +8,7 @@
 // （skill-asset-help ルール準拠）。
 
 const ALL_LEAF_IDS = Object.freeze([
+  'correctness/acceptance-criteria',
   'correctness/logic-invariants',
   'correctness/api-contract',
   'correctness/concurrency',
@@ -26,7 +27,7 @@ const REVIEW_ASPECT_FILES = Object.freeze({
 
 /**
  * 指定された葉集合に対応する観点定義ファイルを、共通ファイル・葉ごとの事前用・
- * 事後用の順に返す。葉IDはmanifest由来の値なので、正規の7葉以外をパス化しない。
+ * 事後用の順に返す。葉IDはmanifest由来の値なので、正規の葉以外をパス化しない。
  *
  * @param {string[]} leafIds
  * @returns {string[]}
@@ -48,7 +49,7 @@ function reviewFilesForLeaves(leafIds) {
 }
 
 const TRUNK_TO_LEAVES = Object.freeze({
-  'Correctness': ['correctness/logic-invariants', 'correctness/api-contract', 'correctness/concurrency'],
+  'Correctness': ['correctness/acceptance-criteria', 'correctness/logic-invariants', 'correctness/api-contract', 'correctness/concurrency'],
   'Resilience & Security': ['resilience-security/failure-recovery', 'resilience-security/hostile-input'],
   'Maintainability': ['maintainability/structure-naming', 'maintainability/design-quality'],
   'Test Quality': ['test-quality/test-quality'],

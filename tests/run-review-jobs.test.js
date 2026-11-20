@@ -305,8 +305,9 @@ test('resolveReviewSkillsDir: 通常時は managedRoot() 配下の正本パス�
   assert.equal(customDir, path.resolve('/custom/skills/gh-maestro-reviewer'));
 });
 
-test('レビュー観点の8葉はcommon/pre/postの固定レイアウトを持つ', () => {
+test('レビュー観点の9葉はcommon/pre/postの固定レイアウトを持つ', () => {
   const expectedLeafIds = [
+    'correctness/acceptance-criteria',
     'correctness/logic-invariants',
     'correctness/api-contract',
     'correctness/concurrency',
@@ -316,7 +317,7 @@ test('レビュー観点の8葉はcommon/pre/postの固定レイアウトを持�
     'maintainability/design-quality',
     'test-quality/test-quality',
   ];
-  assert.deepEqual(ALL_LEAF_IDS, expectedLeafIds, '正本の8葉一覧はこの固定集合と一致する');
+  assert.deepEqual(ALL_LEAF_IDS, expectedLeafIds, '正本の9葉一覧はこの固定集合と一致する');
 
   const skillsDir = path.join(__dirname, '..', 'skills', 'gh-maestro-reviewer');
   const common = fs.readFileSync(path.join(skillsDir, 'common.md'), 'utf8');
@@ -333,6 +334,12 @@ test('レビュー観点の8葉はcommon/pre/postの固定レイアウトを持�
     assert.doesNotMatch(pre, /確認順序/);
     assert.doesNotMatch(post, /確認順序/);
     assert.doesNotMatch(pre, /スコープ限定なしの全件テスト実行/);
+    if (leafId === 'correctness/acceptance-criteria') {
+      assert.match(pre, /ファイル名や基準への言及だけで条件を満たしたとみなさない/);
+      assert.match(pre, /手順が条件に必要な全ての規則を参照・適用しているか/);
+      assert.match(pre, /番号付きの基準・節を参照する場合、その参照を対象 HEAD の実際の見出しと本文に対応付ける/);
+      assert.match(post, /manifest に列挙された受け入れ条件をすべて確認したか/);
+    }
     assert.match(post, /## 重点/);
   }
 });
@@ -701,12 +708,46 @@ test('validateManifest: acceptanceCriteria is optional and validates non-empty s
   }
 });
 
+test('validateManifest: 受け入れ条件がある場合は照合葉の採用とCorrectnessジョブへの割り当てを必須にする', () => {
+  const leaves = ALL_LEAF_IDS.map(id => ({
+    id,
+    trunk: Object.entries(TRUNK_TO_LEAVES).find(([, lvs]) => lvs.includes(id))[0],
+    decision: 'adopted', rationale: null,
+  }));
+  const jobs = Object.entries(TRUNK_TO_LEAVES).map(([aspect, leaf_ids], index) => ({
+    id: `job-${index + 1}`, leaf_ids: [...leaf_ids], aspect,
+  }));
+  const manifest = {
+    pr: 1, repo: 'o/r', headRefOid: 'abc', acceptanceCriteria: ['条件A'],
+    coverage_ledger: { leaves }, jobs,
+  };
+  assert.equal(validateManifest(manifest).valid, true);
+
+  const excludedLeaf = structuredClone(manifest);
+  const acceptanceEntry = excludedLeaf.coverage_ledger.leaves.find(leaf => leaf.id === 'correctness/acceptance-criteria');
+  acceptanceEntry.decision = 'excluded';
+  acceptanceEntry.rationale = '差分に関連しない';
+  excludedLeaf.jobs.find(job => job.aspect === 'Correctness').leaf_ids = excludedLeaf.jobs
+    .find(job => job.aspect === 'Correctness').leaf_ids.filter(id => id !== 'correctness/acceptance-criteria');
+  const excludedResult = validateManifest(excludedLeaf);
+  assert.equal(excludedResult.valid, false);
+  assert.ok(excludedResult.errors.some(error => error.includes('must be adopted when acceptanceCriteria is present')));
+
+  const wrongTrunk = structuredClone(manifest);
+  const correctnessJob = wrongTrunk.jobs.find(job => job.aspect === 'Correctness');
+  correctnessJob.leaf_ids = correctnessJob.leaf_ids.filter(id => id !== 'correctness/acceptance-criteria');
+  wrongTrunk.jobs.find(job => job.aspect === 'Test Quality').leaf_ids.push('correctness/acceptance-criteria');
+  const wrongTrunkResult = validateManifest(wrongTrunk);
+  assert.equal(wrongTrunkResult.valid, false);
+  assert.ok(wrongTrunkResult.errors.some(error => error.includes('must be assigned to a Correctness job')));
+});
+
 test('buildJobPrompt passes manifest acceptance criteria without external lookup', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-acceptance-'));
   try {
-    writeReviewFixtures(tmpDir, ['correctness/logic-invariants']);
+    writeReviewFixtures(tmpDir, ['correctness/acceptance-criteria']);
     const prompt = buildJobPrompt(
-      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
+      { id: 'job-1', leaf_ids: ['correctness/acceptance-criteria'], aspect: 'Correctness' },
       {
         pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'],
         acceptanceCriteria: ['保存後に内容を保持する', '失敗時に状態を維持する'],
@@ -717,25 +758,11 @@ test('buildJobPrompt passes manifest acceptance criteria without external lookup
     assert.match(prompt, /保存後に内容を保持する/);
     assert.match(prompt, /失敗時に状態を維持する/);
     assert.match(prompt, /manifestに存在する受け入れ条件/);
-    assert.match(prompt, /評価対象は従来どおり変更差分の中に限ってください/);
+    assert.match(prompt, /変更ファイル一覧やdiffに無い場合も/);
+    assert.match(prompt, /条件自体の是非も論じない/);
+    assert.match(prompt, /一般的な基準への参照だけで/);
+    assert.match(prompt, /特定の役割に動作を求める場合/);
     assert.doesNotMatch(prompt, /gh issue view/);
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('buildJobPrompt keeps the input contract when manifest has no acceptance criteria', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gjpm-no-acceptance-'));
-  try {
-    writeReviewFixtures(tmpDir, ['correctness/logic-invariants']);
-    const prompt = buildJobPrompt(
-      { id: 'job-1', leaf_ids: ['correctness/logic-invariants'], aspect: 'Correctness' },
-      { pr: 123, repo: 'o/r', headRefOid: 'abc123', changedFiles: ['src/a.ts'] },
-      tmpDir,
-      { reviewSkillsDir: tmpDir },
-    );
-    assert.match(prompt, /以下のdiffと変更ファイル一覧、およびmanifestに存在する受け入れ条件だけ/);
-    assert.doesNotMatch(prompt, /保存後に内容を保持する/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -885,7 +912,7 @@ test('runJobsFromManifest: 検証失敗時に通知を実行し ok:false で返�
   try {
     const manifestPath = path.join(testDir, 'manifest.json');
     const resultsPath = path.join(testDir, 'results.json');
-    // 機械検証に落ちるmanifest（7葉から1葉しか含まない + jobs空）
+    // 機械検証に落ちるmanifest（9葉から1葉しか含まない + jobs空）
     const invalidManifest = {
       pr: 11, repo: 'o/r', headRefOid: 'abc',
       coverage_ledger: {

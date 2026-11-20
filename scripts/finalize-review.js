@@ -61,7 +61,7 @@ Output:
 // ── 完全性ゲート ──────────────────────────────────────────────────────────────
 
 /**
- * 7葉の完全な会計を機械的に検証する。
+ * 全葉の完全な会計を機械的に検証する。
  * 判断を一切加えず、欠落・重複・未割当・結果欠如のみを検出する。
  *
  * @param {object} coverageLedger
@@ -71,7 +71,7 @@ Output:
 function checkCompleteness(coverageLedger, jobResults) {
   const failures = [];
 
-  // 1. 全7葉がledger上に出現するか
+  // 1. 全葉がledger上に出現するか
   const ledgerLeaves = new Map();
   const adoptedLeaves = new Set();
   const excludedLeaves = [];
