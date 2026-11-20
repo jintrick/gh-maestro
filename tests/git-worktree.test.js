@@ -1,0 +1,153 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+
+// git-worktree.js は child-process.js の spawnSync に依存するため、
+// これをモックして実プロセスを0個spawnする。
+//
+
+const gitWorktreePath = require.resolve('../scripts/shared/git-worktree');
+
+/**
+ * scripts/shared/child-process.js の spawnSync をモックした状態で git-worktree.js を再ロードする。
+ * @param {Function} spawnSyncImpl (cmd, args, opts) => result - 呼び出し順に応じた戻り値を返す
+ */
+function loadModule(spawnSyncImpl) {
+  const calls = [];
+  let callIndex = 0;
+  const fakeSpawnSync = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    const impl = spawnSyncImpl ? spawnSyncImpl(cmd, args, opts, callIndex) : { status: 0, stdout: '' };
+    callIndex++;
+    return impl;
+  };
+
+  const childProcessPath = require.resolve('../scripts/shared/child-process');
+  delete require.cache[childProcessPath];
+  require.cache[childProcessPath] = {
+    id: childProcessPath,
+    filename: childProcessPath,
+    loaded: true,
+    exports: {
+      spawn: () => { throw new Error('spawn should not be called in this test'); },
+      spawnSync: fakeSpawnSync,
+      execSync: () => '',
+    },
+  };
+
+  delete require.cache[gitWorktreePath];
+  const mod = require(gitWorktreePath);
+
+  delete require.cache[childProcessPath];
+  return { mod, calls };
+}
+
+// ── worktreeAdd ───────────────────────────────────────────────────────────────
+
+test('worktreeAdd: baseRefあり — worktree add後に --set-upstream-to を呼ぶ', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+  mod.worktreeAdd('/tmp/wt', 'feat-x', 'dev', '/repo');
+
+  // 1回目: git worktree add
+  assert.equal(calls[0].cmd, 'git');
+  assert.ok(calls[0].args.includes('worktree'));
+  assert.ok(calls[0].args.includes('add'));
+  assert.ok(calls[0].args.includes('--quiet'));
+  assert.ok(calls[0].args.includes('/tmp/wt'));
+  assert.ok(calls[0].args.includes('-b'));
+  assert.ok(calls[0].args.includes('feat-x'));
+  assert.ok(calls[0].args.includes('origin/dev'));
+
+  // 呼び出しは worktree add と set-upstream-to の2回だけ（余計な git 呼び出しや順序の入れ替えを検出する）
+  assert.equal(calls.length, 2);
+
+  // 2回目: git branch --set-upstream-to
+  assert.equal(calls[1].cmd, 'git');
+  assert.ok(calls[1].args.includes('branch'));
+  assert.ok(calls[1].args.includes('--set-upstream-to'));
+  assert.ok(calls[1].args.includes('origin/dev'));
+  assert.ok(calls[1].args.includes('--'));
+  assert.ok(calls[1].args.includes('feat-x'));
+});
+
+test('worktreeAdd: baseRefなし — --set-upstream-to を呼ばない', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+  mod.worktreeAdd('/tmp/wt', 'feat-x', null, '/repo');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'git');
+  assert.ok(calls[0].args.includes('worktree'));
+  assert.ok(calls[0].args.includes('add'));
+  assert.ok(calls[0].args.includes('--quiet'));
+});
+
+test('worktreeAdd: worktree add 失敗時は --set-upstream-to を呼ばずに throw', () => {
+  let callCount = 0;
+  const { mod, calls } = loadModule((cmd, args) => {
+    callCount++;
+    if (args.includes('worktree') && args.includes('add')) {
+      return { status: 128, stderr: 'fatal: ...' };
+    }
+    return { status: 0, stdout: '' };
+  });
+
+  assert.throws(() => mod.worktreeAdd('/tmp/wt', 'feat-x', 'dev', '/repo'), {
+    message: /exited with 128/,
+  });
+
+  // worktree addだけが呼ばれ、--set-upstream-to は呼ばれていない
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].args.includes('worktree'));
+  assert.ok(calls[0].args.includes('add'));
+});
+
+// ── worktreeAddDetached ─────────────────────────────────────────────────────────
+
+const SHA = '0123456789abcdef0123456789abcdef01234567'; // 40桁の16進数
+
+test('worktreeAddDetached: --detach と sha を -- 区切りで渡す', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+  mod.worktreeAddDetached('/tmp/wt', SHA, '/repo');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'git');
+  assert.ok(calls[0].args.includes('worktree'));
+  assert.ok(calls[0].args.includes('add'));
+  assert.ok(calls[0].args.includes('--detach'));
+  assert.ok(calls[0].args.includes('/tmp/wt'));
+  // sha は -- セパレータの後（git-arg-injection ルール: '-' 始まりの値がオプション化しない）
+  const dashIdx = calls[0].args.indexOf('--');
+  assert.ok(dashIdx >= 0);
+  assert.equal(calls[0].args[dashIdx + 1], SHA);
+});
+
+test('worktreeAddDetached: git が失敗したら throw', () => {
+  const { mod } = loadModule(() => ({ status: 128, stderr: 'fatal: ...' }));
+  assert.throws(
+    () => mod.worktreeAddDetached('/tmp/wt', SHA, '/repo'),
+    { message: /exited with 128/ },
+  );
+});
+
+// ── worktreeRemove: リンクを外せると確認できなければ git を呼ばない（Issue #737） ──
+
+test('worktreeRemove: リンクの除去を判定できない作業場所では git worktree remove を呼ばず throw する', () => {
+  const { withTempDir } = require('../scripts/shared/temp-directory');
+  withTempDir('ghm-wt-remove-guard-', (base) => {
+    // dir をファイルにすると readdir が失敗し、リンクの有無を確認できない状態になる
+    const notADir = require('path').join(base, 'wt');
+    require('fs').writeFileSync(notADir, 'x');
+    const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+    assert.throws(() => mod.worktreeRemove(notADir, '/repo'), { code: 'WORKTREE_LINKS_UNVERIFIABLE' });
+    assert.equal(calls.length, 0, 'git が呼ばれてはならない（リンク先を消す危険）');
+  });
+});
+
+test('worktreeRemove: 作業場所が存在しなければ従来どおり --force 付きで git worktree remove を呼ぶ', () => {
+  const { mod, calls } = loadModule(() => ({ status: 0, stdout: '' }));
+  mod.worktreeRemove('/definitely/not/here/wt', '/repo');
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].args.includes('remove'));
+  assert.ok(calls[0].args.includes('--force'), '--force 付きで remove すること');
+});

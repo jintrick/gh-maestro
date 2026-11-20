@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: alpha fails
+not ok 1 - alpha fails
+  ---
+  duration_ms: 1.5998
+  type: 'test'
+  location: '__WORKTREE__/tests/f.test.js:3:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    sum mismatch
+
+    2 !== 3
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 3
+  actual: 2
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (__WORKTREE__/tests/f.test.js:3:36)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+  ...
+# Subtest: beta fails
+not ok 2 - beta fails
+  ---
+  duration_ms: 1.8834
+  type: 'test'
+  location: '__WORKTREE__/tests/f.test.js:4:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      {
+    +   a: 1
+    -   a: 2
+      }
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    a: 2
+  actual:
+    a: 1
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (__WORKTREE__/tests/f.test.js:4:35)
+  ...
+# Subtest: gamma ok
+ok 3 - gamma ok
+  ---
+  duration_ms: 0.1692
+  type: 'test'
+  ...
+1..3
+# tests 3
+# pass 1
+# fail 2

@@ -1,0 +1,650 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  main,
+  isValidCommentId,
+  isValidPrCommentId,
+  buildPrCommentRelayEvents,
+  formatTestStatusEvent,
+  pollReviewsStateFiles,
+  runPollReviews,
+} = require('../scripts/poll-reviews.js');
+
+test('isValidCommentId: 正の整数IDだけを受理する', () => {
+  assert.equal(isValidCommentId('12345'), true);
+  assert.equal(isValidCommentId('1'), true);
+});
+
+test('isValidCommentId: GitHubエラーレスポンス由来のゴミ断片を弾く', () => {
+  // 実障害: GitHub障害中に 404 JSON や切れた出力の断片が state 記録・中継された
+  assert.equal(isValidCommentId('}'), false);
+  assert.equal(isValidCommentId(''), false);
+  assert.equal(isValidCommentId('{"message": "Not Found"'), false);
+  assert.equal(isValidCommentId('  '), false);
+  assert.equal(isValidCommentId('12a'), false);
+  assert.equal(isValidCommentId('-1'), false);
+});
+
+test('isValidPrCommentId: GraphQLの不透明なPRコメントIDを受理する', () => {
+  assert.equal(isValidPrCommentId('IC_kwDOSr7Ezc8AAAABPxKo7g'), true);
+  assert.equal(isValidPrCommentId('opaque-global-node-id'), true);
+});
+
+test('isValidPrCommentId: 欠落・空白のPRコメントIDを拒否する', () => {
+  assert.equal(isValidPrCommentId(undefined), false);
+  assert.equal(isValidPrCommentId(null), false);
+  assert.equal(isValidPrCommentId(''), false);
+  assert.equal(isValidPrCommentId('  '), false);
+});
+
+test('buildPrCommentRelayEvents: GraphQL IDのPRコメントを中継し、既読・不正コメントは除外する', () => {
+  const known = new Set(['IC_known']);
+  const comments = [
+    { id: 'IC_new', author: { login: 'reviewer' }, body: 'レビュー\n停止理由' },
+    { id: 'IC_known', author: { login: 'reviewer' }, body: '既読' },
+    { id: '', author: { login: 'reviewer' }, body: 'IDなし' },
+    { author: { login: 'reviewer' }, body: 'ID欠落' },
+  ];
+
+  assert.deepEqual(buildPrCommentRelayEvents(comments, known), [
+    { id: 'IC_new', line: 'PR_COMMENT:reviewer:レビュー 停止理由' },
+  ]);
+});
+
+const { pollDegradationTransition } = require('../scripts/poll-reviews.js');
+
+test('pollDegradationTransition: 正常→劣化の遷移でPOLL_ERRORを一度だけ発火', () => {
+  assert.deepEqual(pollDegradationTransition(false, true), { degraded: true, emit: 'POLL_ERROR' });
+  // 劣化継続中は再発火しない（スパム防止）
+  assert.deepEqual(pollDegradationTransition(true, true), { degraded: true, emit: null });
+});
+
+test('pollDegradationTransition: 劣化→復旧の遷移でPOLL_RECOVEREDを一度だけ発火', () => {
+  assert.deepEqual(pollDegradationTransition(true, false), { degraded: false, emit: 'POLL_RECOVERED' });
+  // 正常継続中は何も出さない
+  assert.deepEqual(pollDegradationTransition(false, false), { degraded: false, emit: null });
+});
+
+// ── reviewTerminalEvent（Issue #289: CLOSED も終端として扱う） ──────────────
+const { reviewTerminalEvent } = require('../scripts/poll-reviews.js');
+
+test('reviewTerminalEvent: MERGED は PR_MERGED として終端', () => {
+  assert.equal(reviewTerminalEvent('MERGED', '12'), 'PR_MERGED:12');
+});
+
+test('reviewTerminalEvent: CLOSED（却下・キャンセル）も PR_CLOSED として終端', () => {
+  // Issue #289: 従来は MERGED のみ終端だったため、CLOSED された PR を監視し続けて
+  // 機能死を起こした。CLOSED も終端にすることで新 PR 検出へ戻れる。
+  assert.equal(reviewTerminalEvent('CLOSED', '12'), 'PR_CLOSED:12');
+});
+
+test('reviewTerminalEvent: OPEN 等の非終端状態は null（監視継続）', () => {
+  assert.equal(reviewTerminalEvent('OPEN', '12'), null);
+  assert.equal(reviewTerminalEvent('DRAFT', '12'), null);
+  assert.equal(reviewTerminalEvent('', '12'), null);
+});
+
+// ── extractTestDeclaration & evaluateTestDeclaration ────────────────────────
+const { extractTestDeclaration, evaluateTestDeclaration } = require('../scripts/poll-reviews.js');
+const { TEST_RESULT_MARKER, LEGACY_TEST_RESULT_MARKER } = require('../scripts/shared/test-declaration');
+
+function fullDeclarationBody(commit = 'a1b2c3d4e5', fail = 0, pass = 1826, scope = 'full') {
+  return `${TEST_RESULT_MARKER}
+### 🧪 テスト結果申告
+- **対象コミット**: \`${commit}\`
+- **結果**: ${fail === 0 ? 'pass' : 'fail'} (fail: ${fail}, pass: ${pass})
+- **実行件数**: \`${fail + pass}\`
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`${scope}\`
+- **lint**: pass (findings: 0)`;
+}
+
+function aggregateDeclarationBody(commit = 'a1b2c3d4e5f6') {
+  return `${TEST_RESULT_MARKER}
+### 🧪 テスト結果申告
+- **対象コミット**: \`${commit}\`
+- **結果**: pass
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`aggregate\`
+- **lint**: pass (findings: 0)
+- **層別結果**:
+  - **full**: pass (fail: 0, pass: 1826), tests: 1826, executor: \`test-runner\`, scope: \`full\`
+  - **slow**: pass (fail: 0, pass: 10), tests: 10, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`C:/runtime/slow.log\``;
+}
+
+test('formatTestStatusEvent: provenance/scope をTEST_STATUS通知へ含める', () => {
+  assert.equal(
+    formatTestStatusEvent({
+      status: 'GREEN',
+      declaredSha: 'a1b2c3d',
+      headSha: 'a1b2c3d4e5f6',
+      provenance: 'test-runner',
+      scope: 'full',
+    }),
+    'TEST_STATUS:GREEN:a1b2c3d:a1b2c3d4e5f6:test-runner:full:lint=missing:typecheck=missing',
+  );
+  assert.equal(
+    formatTestStatusEvent({ status: 'NONE', provenance: 'unknown', scope: 'unknown' }),
+    'TEST_STATUS:NONE:none:none:unknown:unknown:lint=missing:typecheck=missing',
+  );
+  const aggregateEvaluation = evaluateTestDeclaration(
+    extractTestDeclaration(aggregateDeclarationBody()),
+    'a1b2c3d4e5f6',
+  );
+  assert.equal(
+    formatTestStatusEvent(aggregateEvaluation),
+    'TEST_STATUS:GREEN:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass:typecheck=missing',
+  );
+});
+
+test('formatTestStatusEvent: lintの4状態を既存TEST_STATUSへ含める', () => {
+  const cases = [
+    [{ status: 'complete', outcome: 'pass', findingCount: 0 }, 'lint=complete/pass'],
+    [{ status: 'complete', outcome: 'findings', findingCount: 3 }, 'lint=complete/findings(3)'],
+    [{ status: 'unavailable', reason: 'lint-output-invalid' }, 'lint=unavailable/lint-output-invalid'],
+    [{ status: 'missing', reason: 'lint-result-missing' }, 'lint=missing'],
+  ];
+  for (const [lint, token] of cases) {
+    assert.match(formatTestStatusEvent({
+      status: 'GREEN',
+      declaredSha: 'a1b2c3d',
+      headSha: 'a1b2c3d4e5f6',
+      provenance: 'test-runner',
+      scope: 'aggregate',
+      lint,
+    }), new RegExp(`${token.replace(/[()]/g, '\\$&')}:typecheck=missing$`));
+  }
+});
+
+test('formatTestStatusEvent: typecheck状態を末尾へ足し、テスト状態とは独立させる', () => {
+  const base = { status: 'GREEN', declaredSha: 'abc1234', headSha: 'abc1234', provenance: 'test-runner', scope: 'full' };
+  for (const [typecheck, token] of [
+    [{ status: 'complete', outcome: 'pass', exitCode: 0 }, 'complete/pass(0)'],
+    [{ status: 'complete', outcome: 'fail', exitCode: 2 }, 'complete/fail(2)'],
+    [{ status: 'unavailable', reason: 'spawn-failed' }, 'unavailable/spawn-failed'],
+    [{ status: 'undefined' }, 'undefined'],
+    [undefined, 'missing'],
+  ]) {
+    assert.ok(formatTestStatusEvent({ ...base, typecheck }).endsWith(`:typecheck=${token}`));
+    assert.equal(formatTestStatusEvent({ ...base, typecheck }).split(':')[1], 'GREEN');
+  }
+});
+
+test('extractTestDeclaration: lintの4状態を共有申告解析へ保持する', () => {
+  const lines = [
+    ['pass (findings: 0)', { status: 'complete', outcome: 'pass', findingCount: 0 }],
+    ['findings (findings: 4)', { status: 'complete', outcome: 'findings', findingCount: 4 }],
+    ['unavailable, reason: eslint-not-found', { status: 'unavailable', reason: 'eslint-not-found' }],
+    ['missing, reason: lint-result-missing', { status: 'missing', reason: 'lint-result-missing' }],
+  ];
+  for (const [line, expected] of lines) {
+    const declaration = extractTestDeclaration(`${fullDeclarationBody().replace(/- \*\*lint\*\*:.*$/, `- **lint**: ${line}`)}`);
+    assert.deepEqual(declaration.lint, expected);
+  }
+});
+
+test('extractTestDeclaration: findings件数の欠落・不正・安全整数超過を0へ丸めない', () => {
+  for (const lintLine of [
+    'findings',
+    'findings (findings: invalid)',
+    'findings (findings: 9007199254740992)',
+  ]) {
+    const declaration = extractTestDeclaration(
+      fullDeclarationBody().replace(/- \*\*lint\*\*:.*$/, `- **lint**: ${lintLine}`),
+    );
+    assert.deepEqual(declaration.lint, {
+      status: 'complete',
+      outcome: 'findings',
+    });
+    assert.equal(
+      formatTestStatusEvent(evaluateTestDeclaration(declaration, 'a1b2c3d4e5')),
+      'TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/findings(unknown):typecheck=missing',
+    );
+  }
+});
+
+test('poll-reviews: aggregate通知と共有評価は層別結果を保持する', () => {
+  const evaluation = evaluateTestDeclaration(
+    extractTestDeclaration(aggregateDeclarationBody()),
+    'a1b2c3d4e5f6',
+  );
+  assert.equal(evaluation.scope, 'aggregate');
+  assert.equal(evaluation.layers.full.pass, 1826);
+  assert.equal(evaluation.layers.slow.executor, 'poll-pr');
+  assert.equal(evaluation.allLayersPresent, true);
+  assert.equal(evaluation.allLayersComplete, true);
+});
+
+test('poll-reviews: テスト名に fail: 0 等の文字列が含まれていても、RED判定と層別件数を狂わせない', () => {
+  const body = `<!-- gh-maestro-test-result:v2 -->
+### 🧪 テスト結果申告
+- **対象コミット**: \`a1b2c3d4e5f6\`
+- **結果**: fail
+- **実行元**: \`test-runner\`
+- **実行範囲**: \`aggregate\`
+- **lint**: pass (findings: 0)
+- **層別結果**:
+  - **full**: fail (fail: 1, pass: 9), tests: 10, executor: \`local\`, scope: \`full\`, 失敗: \`check fail: 0 and pass: 99\`
+  - **slow**: pass (fail: 0, pass: 5), tests: 5, executor: \`poll-pr\`, scope: \`partial\`, 実行記録: \`C:/runtime/slow.log\`
+`;
+  const evaluation = evaluateTestDeclaration(
+    extractTestDeclaration(body),
+    'a1b2c3d4e5f6',
+  );
+  assert.equal(evaluation.status, 'RED');
+  assert.equal(evaluation.layers.full.fail, 1);
+  assert.equal(evaluation.layers.full.pass, 9);
+  assert.deepEqual(evaluation.layers.full.failedTests, ['check fail: 0 and pass: 99']);
+  assert.equal(
+    formatTestStatusEvent(evaluation),
+    'TEST_STATUS:RED:a1b2c3d4e5f6:a1b2c3d4e5f6:test-runner:aggregate:lint=complete/pass:typecheck=missing',
+  );
+});
+
+test('extractTestDeclaration: v2 から commit, fail, pass, provenance, scope を抽出する', () => {
+  const decl = extractTestDeclaration(fullDeclarationBody());
+  assert.deepEqual(decl, {
+    version: 2,
+    commit: 'a1b2c3d4e5',
+    outcome: 'pass',
+    fail: 0,
+    pass: 1826,
+    tests: 1826,
+    provenance: 'test-runner',
+    scope: 'full',
+    lint: { status: 'complete', outcome: 'pass', findingCount: 0 },
+  });
+});
+
+test('extractTestDeclaration: v1 の値は読めても実行範囲は unknown', () => {
+  const body = `${LEGACY_TEST_RESULT_MARKER}
+### 🧪 テスト結果申告
+- **対象コミット**: \`a1b2c3d\`
+- **結果**: fail (fail: 2)`;
+  assert.deepEqual(extractTestDeclaration(body), {
+    version: 1,
+    commit: 'a1b2c3d',
+    fail: 2,
+    pass: undefined,
+    provenance: 'unknown',
+    scope: 'unknown',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
+  });
+});
+
+test('extractTestDeclaration: provenance/scope が欠落した v2 は unknown へ縮退する', () => {
+  const body = `${TEST_RESULT_MARKER}
+- **対象コミット**: \`a1b2c3d\`
+- **結果**: pass (fail: 0, pass: 10)`;
+  assert.deepEqual(extractTestDeclaration(body), {
+    version: 2,
+    commit: 'a1b2c3d',
+    provenance: 'unknown',
+    scope: 'unknown',
+    fail: undefined,
+    pass: undefined,
+    lint: { status: 'missing', reason: 'lint-result-missing' },
+  });
+});
+
+test('evaluateTestDeclaration: 申告なし → NONE と none metadata', () => {
+  const res = evaluateTestDeclaration(null, 'a1b2c3d4e5');
+  assert.deepEqual(res, {
+    status: 'NONE',
+    headSha: 'a1b2c3d4e5',
+    provenance: 'none',
+    scope: 'none',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
+  });
+});
+
+test('evaluateTestDeclaration: headSha が空の場合は STALE ではなく NONE', () => {
+  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100, provenance: 'test-runner', scope: 'full' };
+  assert.deepEqual(evaluateTestDeclaration(decl, ''), {
+    status: 'NONE',
+    declaredSha: 'a1b2c3d',
+    headSha: undefined,
+    fail: 0,
+    pass: 100,
+    provenance: 'test-runner',
+    scope: 'full',
+    lint: { status: 'missing', reason: 'lint-result-missing' },
+  });
+});
+
+test('evaluateTestDeclaration: コミット不一致 → STALE', () => {
+  const decl = { commit: '1111111', fail: 0, pass: 100, provenance: 'test-runner', scope: 'full' };
+  const res = evaluateTestDeclaration(decl, '2222222');
+  assert.equal(res.status, 'STALE');
+  assert.equal(res.provenance, 'test-runner');
+  assert.equal(res.scope, 'full');
+});
+
+test('evaluateTestDeclaration: コミット一致かつ fail 0 → GREEN', () => {
+  const decl = { commit: 'a1b2c3d', fail: 0, pass: 100, provenance: 'test-runner', scope: 'full' };
+  const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6');
+  assert.equal(res.status, 'GREEN');
+  assert.equal(res.provenance, 'test-runner');
+  assert.equal(res.scope, 'full');
+});
+
+test('evaluateTestDeclaration: コミット一致かつ fail > 0 → RED', () => {
+  const decl = { commit: 'a1b2c3d4e5f6', fail: 1, pass: 99, provenance: 'test-runner', scope: 'partial' };
+  const res = evaluateTestDeclaration(decl, 'a1b2c3d4e5f6');
+  assert.equal(res.status, 'RED');
+  assert.equal(res.fail, 1);
+  assert.equal(res.scope, 'partial');
+});
+
+test('extractTestDeclaration: 形式不正や欠落のあるコメントを安全に弾く', () => {
+  // 申告マーカーが無いコメント（統合元: 118）も null
+  assert.equal(extractTestDeclaration('普通のコメント'), null);
+  assert.equal(extractTestDeclaration(''), null);
+  assert.equal(extractTestDeclaration(null), null);
+  assert.equal(extractTestDeclaration(`${LEGACY_TEST_RESULT_MARKER}\n対象コミットなし`), null);
+  assert.equal(extractTestDeclaration(`${LEGACY_TEST_RESULT_MARKER}\n- **対象コミット**: \`1234567\`\n- 結果: 不明`), null);
+  assert.equal(extractTestDeclaration({}), null);
+  assert.equal(extractTestDeclaration(123), null);
+});
+
+// ── CLI: workspace 解決（サブプロセス経由） ─────────────────────────────────
+// workspace 解決は gh 呼び出しより前に行われるため、この検証だけなら実 gh 呼び出しは発生しない。
+
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+
+const pollReviewsScript = path.join(__dirname, '../scripts/poll-reviews.js');
+const tempDirScope = createTempDirScope();
+
+test.after(() => tempDirScope.cleanup());
+
+// ── CLI 引数境界テスト ───────────────────────────────────────────────────
+
+test('CLI: --help 表示にレビューイベント抑止フラグが含まれ exit 0', () => {
+  const res = spawnSync(process.execPath, [pollReviewsScript, '--help'], { encoding: 'utf8' });
+  assert.equal(res.status, 0);
+  assert.ok(res.stdout.includes('--no-review-events'));
+});
+
+test('CLI: 未知のフラグを指定すると非ゼロで exit', () => {
+  const res = spawnSync(process.execPath, [pollReviewsScript, '12', '--unknown-flag'], { encoding: 'utf8' });
+  assert.notEqual(res.status, 0);
+  assert.ok(res.stderr.includes('未知の引数') || res.stderr.includes('--unknown-flag'));
+});
+
+test('CLI: --no-review-manager は未知フラグとして拒否される', () => {
+  const res = spawnSync(process.execPath, [pollReviewsScript, '--no-review-manager'], { encoding: 'utf8' });
+  assert.equal(res.status, 1);
+  assert.ok(res.stderr.includes('--no-review-manager') || res.stderr.includes('未知の引数'));
+});
+
+test('CLI: --no-review-events は未知フラグにならずパースされる', () => {
+  const res = spawnSync(process.execPath, [pollReviewsScript, '--no-review-events'], { encoding: 'utf8' });
+  assert.equal(res.status, 1);
+  assert.ok(res.stderr.includes('poll-reviews: 位置引数が必要です'));
+});
+
+test('CLI: --no-review-events フラグを省略すると runPollReviews に noReviewEvents=false が渡る', async () => {
+  let capturedParams = null;
+  const res = await main(['100', '/test/workspace'], {
+    resolveWorkspaceFn: (ws) => ws,
+    liveness: { watchParent: () => () => true },
+    registerProcessFn: () => {},
+    registerSignalHandlers: false,
+    pollReviewsStateFilesFn: () => ({ files: [] }),
+    runPollReviewsFn: async (params) => {
+      capturedParams = params;
+      return { exitCode: 0 };
+    },
+  });
+
+  assert.equal(res.exitCode, 0);
+  assert.ok(capturedParams, 'runPollReviews must be called');
+  assert.equal(capturedParams.pr, '100');
+  assert.equal(capturedParams.workspace, '/test/workspace');
+  assert.equal(capturedParams.noReviewEvents, false);
+});
+
+test('CLI: --no-review-events の有無で runPollReviews の noReviewEvents が true/false になる（省略時の既定 false を含む）', async () => {
+  const runWith = async (argv) => {
+    let capturedParams = null;
+    const res = await main(argv, {
+      resolveWorkspaceFn: (ws) => ws,
+      liveness: { watchParent: () => () => true },
+      registerProcessFn: () => {},
+      registerSignalHandlers: false,
+      pollReviewsStateFilesFn: () => ({ files: [] }),
+      runPollReviewsFn: async (params) => {
+        capturedParams = params;
+        return { exitCode: 0 };
+      },
+    });
+    assert.equal(res.exitCode, 0);
+    return capturedParams;
+  };
+
+  // 省略時は既定の false（統合元: 393）
+  const defaulted = await runWith(['100', '/test/workspace']);
+  assert.ok(defaulted, 'runPollReviews must be called');
+  assert.equal(defaulted.noReviewEvents, false);
+
+  // 指定時は true
+  const specified = await runWith(['100', '/test/workspace', '--no-review-events']);
+  assert.equal(specified.noReviewEvents, true);
+});
+
+test('CLI: 子プロセス起動で --no-review-events 引数が runPollReviews まで渡る', () => {
+  const probe = `
+    const { main } = require(${JSON.stringify(pollReviewsScript)});
+    main(['100', '/test/workspace', '--no-review-events'], {
+      resolveWorkspaceFn: (w) => w,
+      liveness: { watchParent: () => () => true },
+      registerProcessFn: () => {},
+      registerSignalHandlers: false,
+      pollReviewsStateFilesFn: () => ({ files: [] }),
+      runPollReviewsFn: async (params) => {
+        process.stdout.write(JSON.stringify(params));
+        return { exitCode: 0 };
+      },
+    });
+  `;
+  const res = spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8' });
+  assert.equal(res.status, 0);
+  const parsed = JSON.parse(res.stdout);
+  assert.equal(parsed.noReviewEvents, true);
+  assert.equal(parsed.pr, '100');
+  assert.equal(parsed.workspace, '/test/workspace');
+});
+
+// ── runPollReviews: --no-review-events 振る舞い ────────────────────────────
+
+test('runPollReviews: noReviewEvents=true のとき inline comments と formal reviews API を呼び出さない', async () => {
+  const tmpDir = tempDirScope.mkdtemp('poll-reviews-unit-');
+  const calledGhArgs = [];
+  const stdoutLines = [];
+
+  const mockGhCapture = (args) => {
+    calledGhArgs.push(args);
+    const cmd = args.join(' ');
+    if (cmd.includes('pr view 100 --repo owner/repo --json state,headRefOid,author')) {
+      return 'OPEN|a1b2c3d4e5|alice\n';
+    }
+    if (cmd.includes('pr view 100 --repo owner/repo --json comments')) {
+      return JSON.stringify({
+        comments: [
+          {
+            id: 'IC_1',
+            author: { login: 'alice' },
+            body: fullDeclarationBody('a1b2c3d4e5', 0, 10, 'full'),
+          },
+        ],
+      });
+    }
+    if (cmd.includes('comments')) {
+      return '1|file.js|10|bob|inline comment\n';
+    }
+    if (cmd.includes('reviews')) {
+      return '2|bob|APPROVED|looks good\n';
+    }
+    return '';
+  };
+
+  const res = await runPollReviews({
+    pr: 100,
+    workspace: tmpDir,
+    sessionPid: process.pid,
+    intervalSec: 1,
+    noReviewEvents: true,
+    maxCycles: 1,
+  }, {
+    ghCaptureFn: mockGhCapture,
+    repo: 'owner/repo',
+    checkParentFn: () => true,
+    writeStdoutFn: (text) => stdoutLines.push(text),
+    sleepFn: () => Promise.resolve(),
+  });
+
+  assert.equal(res.exitCode, 0);
+
+  // inline comments API と formal reviews API の呼び出しが無いことを検証
+  const calledApis = calledGhArgs.map(a => a.join(' '));
+  assert.ok(!calledApis.some(cmd => cmd.includes('pulls/100/comments')), 'inline comments API must not be called');
+  assert.ok(!calledApis.some(cmd => cmd.includes('pulls/100/reviews')), 'formal reviews API must not be called');
+
+  // state, headRefOid, author の取得は呼ばれていること
+  assert.ok(calledApis.some(cmd => cmd.includes('pr view 100') && cmd.includes('headRefOid')));
+  // comments の取得（テスト申告評価用）は呼ばれていること
+  assert.ok(calledApis.some(cmd => cmd.includes('pr view 100') && cmd.includes('--json comments')));
+
+  // TEST_STATUS が出力されていること
+  assert.ok(stdoutLines.some(line => line.includes('TEST_STATUS:GREEN:a1b2c3d4e5:a1b2c3d4e5:test-runner:full:lint=complete/pass:typecheck=missing')));
+  // REVIEW_COMMENT や PR_REVIEW が出力されていないこと
+  assert.ok(!stdoutLines.some(line => line.includes('REVIEW_COMMENT')));
+  assert.ok(!stdoutLines.some(line => line.includes('PR_REVIEW')));
+});
+
+test('runPollReviews: noReviewEvents=false のとき inline comments と formal reviews API を呼び出す', async () => {
+  const tmpDir = tempDirScope.mkdtemp('poll-reviews-full-');
+  const calledGhArgs = [];
+  const stdoutLines = [];
+
+  const mockGhCapture = (args) => {
+    calledGhArgs.push(args);
+    const cmd = args.join(' ');
+    if (cmd.includes('pr view 100 --repo owner/repo --json state,headRefOid,author')) {
+      return 'OPEN|sha123|alice\n';
+    }
+    if (cmd.includes('pr view 100 --repo owner/repo --json comments')) {
+      return JSON.stringify({ comments: [] });
+    }
+    if (cmd.includes('pulls/100/comments')) {
+      return '1|file.js|10|bob|inline comment\n';
+    }
+    if (cmd.includes('pulls/100/reviews')) {
+      return '2|charlie|APPROVED|looks good\n';
+    }
+    return '';
+  };
+
+  const res = await runPollReviews({
+    pr: 100,
+    workspace: tmpDir,
+    sessionPid: process.pid,
+    intervalSec: 1,
+    maxCycles: 1,
+  }, {
+    ghCaptureFn: mockGhCapture,
+    repo: 'owner/repo',
+    checkParentFn: () => true,
+    writeStdoutFn: (text) => stdoutLines.push(text),
+    sleepFn: () => Promise.resolve(),
+  });
+
+  assert.equal(res.exitCode, 0);
+
+  const calledApis = calledGhArgs.map(a => a.join(' '));
+  assert.ok(calledApis.some(cmd => cmd.includes('pulls/100/comments')), 'inline comments API must be called');
+  assert.ok(calledApis.some(cmd => cmd.includes('pulls/100/reviews')), 'formal reviews API must be called');
+
+  // REVIEW_COMMENT と PR_REVIEW が出力されていること
+  assert.ok(stdoutLines.some(line => line.includes('REVIEW_COMMENT:file.js|10|bob|inline comment')));
+  assert.ok(stdoutLines.some(line => line.includes('PR_REVIEW:charlie:APPROVED:looks good')));
+});
+
+test('runPollReviews: noReviewEvents=true でも MERGED / CLOSED 終端検出が動作する', async () => {
+  const tmpDir = tempDirScope.mkdtemp('poll-reviews-terminal-');
+  const stdoutLines = [];
+
+  const mockGhCapture = (args) => {
+    const cmd = args.join(' ');
+    if (cmd.includes('pr view 100 --repo owner/repo --json state,headRefOid,author')) {
+      return 'MERGED|sha123|alice\n';
+    }
+    return '';
+  };
+
+  const res = await runPollReviews({
+    pr: 100,
+    workspace: tmpDir,
+    sessionPid: process.pid,
+    intervalSec: 1,
+    noReviewEvents: true,
+    maxCycles: 1,
+  }, {
+    ghCaptureFn: mockGhCapture,
+    repo: 'owner/repo',
+    checkParentFn: () => true,
+    writeStdoutFn: (text) => stdoutLines.push(text),
+    sleepFn: () => Promise.resolve(),
+  });
+
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.terminalEvent, 'PR_MERGED:100');
+  assert.ok(stdoutLines.some(line => line.includes('PR_MERGED:100')));
+});
+
+test('pollReviewsStateFiles: 状態ファイルのパス定義を一元的に払い出し、files配列に全ファイルを含む', () => {
+  const ws = path.join('fake', 'workspace');
+  const pr = 42;
+  const paths = pollReviewsStateFiles(ws, pr);
+  assert.equal(paths.stateDir, path.join(ws, '.gh-maestro'));
+  assert.equal(paths.stateFile, path.join(ws, '.gh-maestro', 'poll-state-42'));
+  assert.equal(paths.shaFile, path.join(ws, '.gh-maestro', 'poll-sha-42'));
+  assert.equal(paths.testStatusFile, path.join(ws, '.gh-maestro', 'poll-test-status-42'));
+  assert.deepEqual(paths.files, [paths.stateFile, paths.shaFile, paths.testStatusFile]);
+});
+
+// 退行経路6（PR #655〜）: 親の監視は PID 監視から stdin EOF 監視へ変わった。
+// 親が居ない（checkParentFn が false）と、GitHub を1回も照会せず parent_dead で終了すること。
+// 親の生存確認を loop の後ろへ移す、または無視すると、この検査が落ちる。
+test('runPollReviews: 親の stdin が EOF（親が居ない）なら GitHub を照会せず parent_dead で終了する', async () => {
+  const tmpDir = tempDirScope.mkdtemp('poll-reviews-parent-eof-');
+  const ghCalls = [];
+  const stderrLines = [];
+  const stdoutLines = [];
+  const res = await runPollReviews({
+    pr: 100,
+    workspace: tmpDir,
+    sessionPid: process.pid,
+    intervalSec: 1,
+    maxCycles: 5,
+  }, {
+    ghCaptureFn: (args) => { ghCalls.push(args); return ''; },
+    repo: 'owner/repo',
+    checkParentFn: () => false,
+    writeStdoutFn: (text) => stdoutLines.push(text),
+    writeStderrFn: (text) => stderrLines.push(text),
+    sleepFn: () => Promise.resolve(),
+  });
+
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.reason, 'parent_dead');
+  assert.equal(ghCalls.length, 0, '親が居ない間は GitHub を照会しない');
+  assert.equal(stdoutLines.length, 0, '親が居ない間は中継イベントを出さない');
+  assert.ok(stderrLines.join('').includes('parent stdin reached EOF'), '終了理由を標準エラーへ出す');
+});
+

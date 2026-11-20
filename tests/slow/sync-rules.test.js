@@ -1,0 +1,290 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawnSync } = require('child_process');
+
+const { parseFrontmatter, toAgyFrontmatter } = require('../../scripts/sync-rules');
+const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'sync-rules.js');
+
+function withProject(fn) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-sync-test-'));
+  const savedWorkspace = process.env.GH_MAESTRO_WORKSPACE;
+  delete process.env.GH_MAESTRO_WORKSPACE;
+  try {
+    return fn(base);
+  } finally {
+    if (savedWorkspace !== undefined) process.env.GH_MAESTRO_WORKSPACE = savedWorkspace;
+    else delete process.env.GH_MAESTRO_WORKSPACE;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+}
+
+function withGitWorkspace(fn) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-sync-rules-git-'));
+  const savedWorkspace = process.env.GH_MAESTRO_WORKSPACE;
+  delete process.env.GH_MAESTRO_WORKSPACE;
+  try {
+    const git = (...args) => {
+      const env = { ...process.env };
+      delete env.GH_MAESTRO_WORKSPACE;
+      const r = spawnSync('git', args, { cwd: base, env, encoding: 'utf8' });
+      assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+      return r;
+    };
+    git('init', '-q');
+    git('config', 'user.email', 'test@test.com');
+    git('config', 'user.name', 'test');
+    fs.mkdirSync(path.join(base, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'README.md'), 'init');
+    git('add', 'README.md');
+    git('commit', '-qm', 'init');
+    return fn(base);
+  } finally {
+    if (savedWorkspace !== undefined) process.env.GH_MAESTRO_WORKSPACE = savedWorkspace;
+    else delete process.env.GH_MAESTRO_WORKSPACE;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+}
+
+function runScript(cwd, extraEnv = {}) {
+  const env = { ...process.env, ...extraEnv };
+  delete env.GH_MAESTRO_WORKSPACE;
+  return spawnSync(process.execPath, [SCRIPT], { cwd, env, encoding: 'utf8' });
+}
+
+// ── parseFrontmatter ──────────────────────────────────────────────────────────
+
+
+
+
+
+
+// ── toAgyFrontmatter ──────────────────────────────────────────────────────────
+
+
+
+
+
+// ── --help ───────────────────────────────────────────────────────────────────
+
+test('syncRules: --help は終了コード0でusageを表示する', () => {
+  const r = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /Usage: node sync-rules\.js/);
+});
+
+// ── syncRules (integration) ───────────────────────────────────────────────────
+
+test('syncRules: .claude/rules/ を .agents/rules/ に同期する', () => {
+  withProject(base => {
+    const src = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, 'rule.md'),
+      `---\npaths:\n  - "src/**/*.js"\n---\n\nbody text`);
+
+    const r = runScript(base);
+    assert.equal(r.status, 0, r.stderr);
+
+    const dst = path.join(base, '.agents', 'rules', 'rule.md');
+    assert.ok(fs.existsSync(dst));
+    const out = fs.readFileSync(dst, 'utf8');
+    assert.ok(out.startsWith('---\ntrigger: glob\nglobs: src/**/*.js\n---\n'));
+    assert.ok(out.includes('body text'));
+  });
+});
+
+test('syncRules: .agents/rules/ の孤児ファイルを削除する', () => {
+  withProject(base => {
+    const src = path.join(base, '.claude', 'rules');
+    const dst = path.join(base, '.agents', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.mkdirSync(dst, { recursive: true });
+    fs.writeFileSync(path.join(src, 'rule.md'),
+      `---\npaths:\n  - "src/**/*.js"\n---\nbody`);
+    fs.writeFileSync(path.join(dst, 'orphan.md'), 'old content');
+
+    const r = runScript(base);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(path.join(dst, 'orphan.md')));
+  });
+});
+
+test('syncRules: .claude/rules/ がなければエラー終了する', () => {
+  withProject(base => {
+    const r = runScript(base);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /\.claude\/rules/);
+  });
+});
+
+test('syncRules: paths: なしのファイルはエラー終了する', () => {
+  withProject(base => {
+    const src = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, 'bad.md'), '# no frontmatter');
+
+    const r = runScript(base);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /bad\.md/);
+  });
+});
+
+test('syncRules: workspace未解決時は stderr に警告を出力する', () => {
+  withProject(base => {
+    // 子プロセスの home を一時ディレクトリへ向ける（実ホームへ失敗記録を書かない）。
+    // workspace が home と同じ場合に未解決として扱われる、という条件は保つ。
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-sync-rules-home-'));
+    try {
+      const r = spawnSync(process.execPath, [SCRIPT], {
+        cwd: base,
+        env: { ...process.env, USERPROFILE: fakeHome, HOME: fakeHome, GH_MAESTRO_WORKSPACE: fakeHome },
+        encoding: 'utf8',
+      });
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /同期失敗の記録に失敗しました/);
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test('syncRules: 同期失敗時に .gh-maestro/sync-failures/sync-rules.yaml を作成し、timestamp・error・head を記録する', () => {
+  withGitWorkspace(base => {
+    const src = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, 'bad.md'), '# no frontmatter');
+
+    const r = runScript(base);
+    assert.notEqual(r.status, 0);
+
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-rules.yaml');
+    assert.ok(fs.existsSync(failureFile), 'sync-rules.yaml が生成されていること');
+    const content = fs.readFileSync(failureFile, 'utf8');
+    assert.match(content, /^timestamp:\s*\d{4}-\d{2}-\d{2}T/m);
+    assert.match(content, /^error:\s*".*bad\.md.*"/m);
+    assert.match(content, /^head:\s*[0-9a-f]{40}$/m);
+  });
+});
+
+test('syncRules: 同期成功時に既存の .gh-maestro/sync-failures/sync-rules.yaml を削除する', () => {
+  withGitWorkspace(base => {
+    const failureDir = path.join(base, '.gh-maestro', 'sync-failures');
+    fs.mkdirSync(failureDir, { recursive: true });
+    const failureFile = path.join(failureDir, 'sync-rules.yaml');
+    fs.writeFileSync(failureFile, 'stale failure', 'utf8');
+
+    const src = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, 'rule.md'),
+      `---\npaths:\n  - "src/**/*.js"\n---\n\nbody text`);
+
+    const r = runScript(base);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(failureFile), '同期成功後に sync-rules.yaml が削除されていること');
+  });
+});
+
+test('syncRules: fs例外（.agents/rules がファイルで mkdir/write 失敗）でも recordSyncFailure が呼ばれて記録が残る', () => {
+  withGitWorkspace(base => {
+    const src = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, 'rule.md'),
+      `---\npaths:\n  - "src/**/*.js"\n---\n\nbody text`);
+
+    // .agents ディレクトリ内に rules を通常ファイルとして作成（mkdirSyncがEEXIST / ENOTDIRで失敗する）
+    fs.mkdirSync(path.join(base, '.agents'), { recursive: true });
+    fs.writeFileSync(path.join(base, '.agents', 'rules'), 'not-a-directory');
+
+    const r = runScript(base);
+    assert.notEqual(r.status, 0);
+
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-rules.yaml');
+    assert.ok(fs.existsSync(failureFile), 'fs例外時にも sync-rules.yaml が生成されていること');
+    const content = fs.readFileSync(failureFile, 'utf8');
+    assert.match(content, /^error:\s*".*"/m);
+  });
+});
+
+test('pre-commit フック経由: .claude/rules/ 配下の同期失敗でもコミットは成立し、sync-rules.yaml が生成される', () => {
+  withGitWorkspace(base => {
+    // フック配置（.githooks/pre-commit 相当）
+    const hooksDir = path.join(base, '.git', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const preCommitHook = path.join(hooksDir, 'pre-commit');
+    fs.writeFileSync(preCommitHook, [
+      '#!/bin/sh',
+      `node "${SCRIPT.split(path.sep).join('/')}" || true`,
+    ].join('\n'), 'utf8');
+    try { fs.chmodSync(preCommitHook, 0o755); } catch {}
+
+    // 不正なルールの追加
+    const rulesDir = path.join(base, '.claude', 'rules');
+    fs.mkdirSync(rulesDir, { recursive: true });
+    fs.writeFileSync(path.join(rulesDir, 'invalid-rule.md'), '# No frontmatter');
+
+    const env = { ...process.env };
+    delete env.GH_MAESTRO_WORKSPACE;
+    const git = (...args) => spawnSync('git', args, { cwd: base, env, encoding: 'utf8' });
+    git('add', '.claude/rules');
+    const commitRes = git('commit', '-m', 'commit with invalid rule');
+
+    // コミットは成立する
+    assert.equal(commitRes.status, 0, `同期失敗でもコミットが成立すること: ${commitRes.stderr}`);
+
+    // sync-rules.yaml が生成されていること
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-rules.yaml');
+    assert.ok(fs.existsSync(failureFile), 'コミット成立後も sync-rules.yaml が生成されていること');
+  });
+});
+
+test('syncRules: 30件でも stdout は最終サマリー1行だけ', () => {
+  const count = 30;
+  withGitWorkspace(base => {
+    const src = path.join(base, '.claude', 'rules');
+    const dst = path.join(base, '.agents', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.mkdirSync(dst, { recursive: true });
+    for (let index = 0; index < count; index += 1) {
+      fs.writeFileSync(path.join(src, `rule-${index}.md`),
+        `---\npaths:\n  - "src/rule-${index}.js"\n---\nbody ${index}`);
+    }
+    fs.writeFileSync(path.join(dst, 'orphan.md'), 'stale');
+
+    const r = runScript(base);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, r.stdout);
+    assert.match(r.stdout, new RegExp(`sync-rules: ${count} 件を \.agents/rules/ へ同期しました`));
+    assert.equal(r.stderr, '');
+    assert.ok(!fs.existsSync(path.join(dst, 'orphan.md')));
+    assert.equal(fs.readdirSync(dst).length, count);
+  });
+});
+
+test('syncRules: 1件の失敗を stderr 1行にまとめ、残りの同期と孤児回収を続ける', () => {
+  withGitWorkspace(base => {
+    const src = path.join(base, '.claude', 'rules');
+    const dst = path.join(base, '.agents', 'rules');
+    fs.mkdirSync(src, { recursive: true });
+    fs.mkdirSync(dst, { recursive: true });
+    fs.writeFileSync(path.join(src, 'good-a.md'), '---\npaths:\n  - "src/a.js"\n---\nA');
+    fs.writeFileSync(path.join(src, 'bad-rule.md'), '# missing frontmatter');
+    fs.writeFileSync(path.join(src, 'good-b.md'), '---\npaths:\n  - "src/b.js"\n---\nB');
+    fs.writeFileSync(path.join(dst, 'orphan.md'), 'stale');
+
+    const r = runScript(base);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, r.stdout);
+    assert.equal(r.stderr.trim().split(/\r?\n/).length, 1, r.stderr);
+    assert.match(r.stderr, /bad-rule\.md/);
+    assert.ok(fs.existsSync(path.join(dst, 'good-a.md')));
+    assert.ok(!fs.existsSync(path.join(dst, 'bad-rule.md')));
+    assert.ok(fs.existsSync(path.join(dst, 'good-b.md')));
+    assert.ok(!fs.existsSync(path.join(dst, 'orphan.md')));
+    const failureFile = path.join(base, '.gh-maestro', 'sync-failures', 'sync-rules.yaml');
+    assert.match(fs.readFileSync(failureFile, 'utf8'), /bad-rule\.md/);
+  });
+});

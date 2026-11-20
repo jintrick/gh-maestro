@@ -1,0 +1,1085 @@
+'use strict';
+
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+
+const {
+  USAGE,
+  listTestLayers,
+  runTests,
+  runLint,
+  runTypecheck,
+  main,
+} = require('../scripts/run-tests');
+const { createBuiltinTestConfig } = require('../scripts/shared/resolve-config');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+const { findRunningInstances, pidsDir } = require('../scripts/process-lifecycle');
+const { buildCommentBody } = require('../scripts/declare-test-result');
+const { readTestResultArtifact, writeTestResultLayer } = require('../scripts/shared/test-result');
+
+const BUILTIN_TEST_LAYERS = createBuiltinTestConfig().layers;
+
+const SHA = '0123456789abcdef0123456789abcdef01234567';
+const CONTENT_HASH = 'a'.repeat(64);
+const tempDirScope = createTempDirScope();
+
+test.after(() => tempDirScope.cleanup());
+
+function tempWorktree() {
+  return tempDirScope.mkdtemp('gh-maestro-run-tests-');
+}
+
+function writeWorkspaceConfig(workspace, config) {
+  const configDir = path.join(workspace, '.gh-maestro');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config), 'utf8');
+}
+
+function tapSummary({ tests, pass, fail, cancelled = 0, skipped = 0, todo = 0 }) {
+  return `# tests ${tests}\n# pass ${pass}\n# fail ${fail}\n# cancelled ${cancelled}\n# skipped ${skipped}\n# todo ${todo}\n`;
+}
+
+function runWithChild({ suite = 'full', layer, testFiles = [], changedFiles = [], child, writeArtifactFn,
+  cwd = tempWorktree(), workspace, homedir = tempWorktree(), actor, env = {}, extraDeps = {} }) {
+  const stdout = [];
+  const stderr = [];
+  const calls = [];
+  const artifacts = [];
+  const invalidations = [];
+  const writes = [];
+  const lintResults = [];
+  const staticCheckRecords = [];
+  const result = runTests(
+    {
+      suite,
+      layer,
+      testFiles,
+      changedFiles,
+      cwd,
+      workspace,
+      homedir,
+      env: {
+        TEST_RUNNER_FIXTURE: '1',
+        ...env,
+        ...((actor || suite === 'slow')
+          ? { GH_MAESTRO_TEST_ACTOR: actor || 'poll-pr' }
+          : {}),
+      },
+    },
+    {
+      clearArtifactFn: (worktree) => calls.push({ type: 'clear', worktree }),
+      resolveGitHeadFn: (worktree) => {
+        calls.push({ type: 'head', worktree });
+        return SHA;
+      },
+      calculateWorktreeContentHashFn: (worktree) => {
+        calls.push({ type: 'hash', worktree });
+        return CONTENT_HASH;
+      },
+      spawnSyncFn: (command, args, options) => {
+        calls.push({ type: 'spawn', command, args, options });
+        return child;
+      },
+      invalidateArtifactFn: (worktree, reason) => invalidations.push({ worktree, reason }),
+      writeArtifactFn: writeArtifactFn || ((worktree, artifact, checks) => {
+        writes.push({ worktree, artifact });
+        artifacts.push(artifact);
+        lintResults.push(checks.lint);
+        staticCheckRecords.push(checks);
+      }),
+      writeStdoutFn: (value) => stdout.push(value),
+      writeStderrFn: (value) => stderr.push(value),
+      ...extraDeps,
+    },
+  );
+  return {
+    result,
+    calls,
+    artifacts,
+    invalidations,
+    writes,
+    lintResults,
+    staticCheckRecords,
+    stdout: stdout.join(''),
+    stderr: stderr.join(''),
+  };
+}
+
+test('runLint: lintの指摘はcomplete/findingsとして記録し、起動結果を終了コードへ変換しない', () => {
+  const calls = [];
+  const result = runLint({
+    cwd: 'C:/worktree',
+    env: {},
+    spawnSyncFn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return {
+        status: 1,
+        stdout: JSON.stringify([{ filePath: 'scripts/example.js', messages: [{ line: 4, message: 'x' }] }]),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.status, 'complete');
+  assert.equal(result.outcome, 'findings');
+  assert.equal(result.findingCount, 1);
+  assert.equal(result.command, 'npm run lint');
+  assert.deepEqual(calls[0].args, ['run', '--silent', 'lint']);
+  assert.equal(calls[0].options.env.GH_MAESTRO_LINT_FORMAT, 'json');
+});
+
+test('runTypecheck: 成功・失敗・起動不能・未定義を共通npm起動結果として区別する', () => {
+  const cwd = tempWorktree();
+  fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit' } }));
+  const run = (status, error) => runTypecheck({
+    cwd, env: {}, testedHead: SHA, testedContentHash: CONTENT_HASH,
+    spawnSyncFn: (command, args, options) => {
+      assert.equal(args.join(' '), 'run --silent typecheck');
+      assert.equal(options.cwd, cwd);
+      return { status, error, stdout: '', stderr: '' };
+    },
+  });
+  assert.deepEqual([run(0).status, run(0).outcome, run(0).exitCode], ['complete', 'pass', 0]);
+  assert.deepEqual([run(2).status, run(2).outcome, run(2).exitCode], ['complete', 'fail', 2]);
+  assert.equal(run(null, new Error('spawn denied')).status, 'unavailable');
+  const absent = runTypecheck({ cwd: tempWorktree(), env: {}, spawnSyncFn: () => assert.fail('未定義scriptは起動しない') });
+  assert.equal(absent.status, 'undefined');
+});
+
+test('runTests: lint結果をテスト層と同じ成果物へ保存し、指摘があってもrunner終了コードを変えない', () => {
+  const fixture = runWithChild({
+    child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+    extraDeps: {
+      lintSpawnSyncFn: () => ({
+        status: 1,
+        stdout: JSON.stringify([{ filePath: 'scripts/example.js', messages: [{ line: 4, message: 'unused' }] }]),
+        stderr: '',
+      }),
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.lintResults[0].status, 'complete');
+  assert.equal(fixture.lintResults[0].outcome, 'findings');
+  assert.equal(fixture.lintResults[0].findingCount, 1);
+  assert.equal(fixture.lintResults[0].testedContentHash, CONTENT_HASH);
+});
+
+test('runTests: fullはtypecheckの失敗を成果物に記録してもテスト終了コードを変えない', () => {
+  const cwd = tempWorktree();
+  fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { typecheck: 'tsc --noEmit' } }));
+  const fixture = runWithChild({
+    cwd,
+    child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+    extraDeps: { typecheckSpawnSyncFn: () => ({ status: 2, stdout: '', stderr: 'type error' }) },
+  });
+  assert.equal(fixture.result.exitCode, 0);
+  assert.deepEqual({ status: fixture.staticCheckRecords[0].typecheck.status, outcome: fixture.staticCheckRecords[0].typecheck.outcome, exitCode: fixture.staticCheckRecords[0].typecheck.exitCode, command: fixture.staticCheckRecords[0].typecheck.command }, {
+    status: 'complete', outcome: 'fail', exitCode: 2, command: 'npm run typecheck',
+  });
+});
+
+test('runTests: full suiteを一度だけ起動し、成功結果をfullとして保存する', () => {
+  const fixture = runWithChild({
+    child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 5, pass: 5, fail: 0 })}`, stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.result.artifactWritten, true);
+  assert.equal(fixture.artifacts.length, 1);
+  assert.equal(fixture.artifacts[0].scope, 'full');
+  assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'pass');
+  assert.equal(fixture.artifacts[0].tests, 5);
+  assert.equal(fixture.artifacts[0].pass, 5);
+  assert.equal(fixture.artifacts[0].fail, 0);
+  assert.equal(fixture.artifacts[0].testedHead, SHA);
+  assert.equal(fixture.artifacts[0].testedContentHash, CONTENT_HASH);
+  assert.equal(fixture.calls.filter((call) => call.type === 'spawn').length, 1);
+  const spawnCall = fixture.calls.find((call) => call.type === 'spawn');
+  assert.equal(spawnCall.command, process.execPath);
+  assert.deepEqual(spawnCall.args, [
+    ...BUILTIN_TEST_LAYERS.full.command.slice(1),
+    ...BUILTIN_TEST_LAYERS.full.defaultTestFiles,
+  ]);
+  assert.match(fixture.stdout, /# tests 5/);
+});
+
+test('runTests: fail時はTAP出力からfailedTestsを成果物へ記録する', () => {
+  const tapOutput = `TAP version 13
+# Subtest: failing test 1
+not ok 1 - failing test 1
+  ---
+  duration_ms: 1.0
+  type: 'test'
+  ...
+# Subtest: passing test 2
+ok 2 - passing test 2
+  ---
+  duration_ms: 0.5
+  type: 'test'
+  ...
+# Subtest: failing test 3
+not ok 3 - failing test 3
+  ---
+  duration_ms: 1.2
+  type: 'test'
+  ...
+${tapSummary({ tests: 3, pass: 1, fail: 2 })}`;
+
+  const fixture = runWithChild({
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.result.artifactWritten, true);
+  assert.equal(fixture.artifacts.length, 1);
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.equal(fixture.artifacts[0].fail, 2);
+  assert.deepEqual(fixture.artifacts[0].failedTests, ['failing test 1', 'failing test 3']);
+});
+
+test('runTests: runnerが赤でもsummaryを保存し、runnerの終了コードを返す', () => {
+  const fixture = runWithChild({
+    child: { status: 1, stdout: tapSummary({ tests: 4, pass: 3, fail: 1 }), stderr: 'not ok 4 - failure\n' },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.equal(fixture.artifacts[0].fail, 1);
+  assert.equal(fixture.artifacts[0].pass, 3);
+  assert.match(fixture.stdout, /not ok|# tests/);
+});
+
+test('runTests: slow suiteはpartialとして記録する', () => {
+  const fixture = runWithChild({
+    suite: 'slow',
+    child: { status: 0, stdout: tapSummary({ tests: 2, pass: 2, fail: 0 }), stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].scope, 'partial');
+  assert.equal(fixture.artifacts[0].command, 'npm run test:slow');
+  const spawnCall = fixture.calls.find((call) => call.type === 'spawn');
+  assert.deepEqual(spawnCall.args, [
+    ...BUILTIN_TEST_LAYERS.slow.command.slice(1),
+    ...BUILTIN_TEST_LAYERS.slow.defaultTestFiles,
+  ]);
+  assert.equal(fixture.artifacts[0].dynamicConcurrency, undefined);
+});
+
+test('runTests: 宣言した動的並列数を実 argv と層別成果物へ渡し、main workspace のreview-jobを数える', () => {
+  const configWorkspace = tempWorktree();
+  const mainWorkspace = tempWorktree();
+  let registryQuery;
+  const fixture = runWithChild({
+    suite: 'slow',
+    actor: 'poll-pr',
+    workspace: configWorkspace,
+    env: { GH_MAESTRO_RUNTIME_WORKSPACE: mainWorkspace },
+    child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          slow: {
+            scope: 'partial',
+            command: [process.execPath, '--test'],
+            dynamicConcurrency: {
+              args: ['--test-concurrency={value}'],
+              cpuReserve: 1,
+              reviewJobCost: 2,
+              minimum: 1,
+            },
+          },
+        },
+      }),
+      availableParallelismFn: () => 12,
+      findRunningInstancesFn: (workspace, options) => {
+        registryQuery = { workspace, options };
+        return [{}, {}, {}];
+      },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
+  });
+
+  assert.deepEqual(registryQuery, {
+    workspace: mainWorkspace,
+    options: { script: 'review-job', failOnReadError: true },
+  });
+  assert.deepEqual(fixture.calls.find(call => call.type === 'spawn').args, [
+    '--test', '--test-concurrency=5',
+  ]);
+  assert.deepEqual(fixture.artifacts[0].dynamicConcurrency, {
+    value: 5,
+    cpuCount: 12,
+    reviewJobCount: 3,
+    status: 'complete',
+    unavailableInputs: [],
+  });
+});
+
+test('runTests: PR worktreeから本体workspaceのPID registryにあるreview-jobを実際に数える', () => {
+  const configWorkspace = tempWorktree();
+  const mainWorkspace = tempWorktree();
+  const runtimeDir = tempWorktree();
+  const previousRuntimeDir = process.env.GH_MAESTRO_RUNTIME_DIR;
+  process.env.GH_MAESTRO_RUNTIME_DIR = runtimeDir;
+
+  try {
+    const registryDir = pidsDir(mainWorkspace);
+    fs.mkdirSync(registryDir, { recursive: true });
+    for (const pid of [910001, 910002, 910003, 910004]) {
+      fs.writeFileSync(path.join(registryDir, `${pid}.json`), JSON.stringify({
+        pid,
+        startTime: '2026-01-01T00:00:00.000Z',
+        workspace: mainWorkspace,
+        script: 'review-job',
+        workerName: `review-job-pr-625-${pid}`,
+      }), 'utf8');
+    }
+
+    const fixture = runWithChild({
+      suite: 'slow',
+      actor: 'poll-pr',
+      workspace: configWorkspace,
+      env: { GH_MAESTRO_RUNTIME_WORKSPACE: mainWorkspace },
+      child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+      extraDeps: {
+        resolveTestConfigFn: () => ({
+          source: 'declared',
+          layers: {
+            slow: {
+              scope: 'partial',
+              command: [process.execPath, '--test'],
+              dynamicConcurrency: {
+                args: ['--test-concurrency={value}'],
+                cpuReserve: 1,
+                reviewJobCost: 2,
+                minimum: 1,
+              },
+            },
+          },
+        }),
+        availableParallelismFn: () => 12,
+        findRunningInstancesFn: (workspace, options) => {
+          assert.equal(workspace, mainWorkspace);
+          assert.deepEqual(options, { script: 'review-job', failOnReadError: true });
+          return findRunningInstances(workspace, {
+            ...options,
+            liveness: require('../scripts/shared/process-liveness').createLiveness({
+              probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z',
+            }),
+          });
+        },
+        lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+      },
+    });
+
+    assert.deepEqual(fixture.calls.find(call => call.type === 'spawn').args, [
+      '--test', '--test-concurrency=3',
+    ]);
+    assert.deepEqual(fixture.artifacts[0].dynamicConcurrency, {
+      value: 3,
+      cpuCount: 12,
+      reviewJobCount: 4,
+      status: 'complete',
+      unavailableInputs: [],
+    });
+  } finally {
+    if (previousRuntimeDir === undefined) delete process.env.GH_MAESTRO_RUNTIME_DIR;
+    else process.env.GH_MAESTRO_RUNTIME_DIR = previousRuntimeDir;
+  }
+});
+
+test('runTests: 動的並列数の入力が読めないときは設定下限をargvと成果物へ残す', () => {
+  const fixture = runWithChild({
+    suite: 'slow',
+    actor: 'poll-pr',
+    child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          slow: {
+            scope: 'partial',
+            command: [process.execPath, '--test'],
+            dynamicConcurrency: {
+              args: ['--test-concurrency={value}'],
+              cpuReserve: 1,
+              reviewJobCost: 1,
+              minimum: 2,
+            },
+          },
+        },
+      }),
+      availableParallelismFn: () => 12,
+      findRunningInstancesFn: () => { throw new Error('registry unavailable'); },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
+  });
+
+  assert.deepEqual(fixture.calls.find(call => call.type === 'spawn').args, [
+    '--test', '--test-concurrency=2',
+  ]);
+  assert.deepEqual(fixture.artifacts[0].dynamicConcurrency, {
+    value: 2,
+    cpuCount: 12,
+    reviewJobCount: null,
+    status: 'unavailable',
+    unavailableInputs: ['reviewJobCount'],
+  });
+});
+
+test('runTests: slow suiteは指定された分離側テストだけを起動する', () => {
+  const testFiles = ['tests/slow/process-lifecycle.test.js', 'tests/slow/config.test.js'];
+  const fixture = runWithChild({
+    suite: 'slow',
+    testFiles,
+    child: { status: 0, stdout: tapSummary({ tests: 2, pass: 2, fail: 0 }), stderr: '' },
+  });
+
+  const spawnCall = fixture.calls.find((call) => call.type === 'spawn');
+  assert.deepEqual(spawnCall.args, [
+    ...BUILTIN_TEST_LAYERS.slow.command.slice(1),
+    ...testFiles,
+  ]);
+  assert.equal(fixture.artifacts[0].scope, 'partial');
+  assert.equal(fixture.artifacts[0].command, 'npm run test:slow');
+});
+
+test('runTests: slow suiteはpoll-pr以外の主体から起動しない', () => {
+  let spawned = false;
+  const result = runTests(
+    { suite: 'slow', cwd: tempWorktree(), env: { GH_MAESTRO_WORKER: 'issue-461-coder' } },
+    { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.artifact, null);
+  assert.equal(spawned, false);
+  assert.match(result.stderr, /slow/);
+});
+
+test('runTests: 専用の全件実行主体はslow層を起動できる', () => {
+  const fixture = runWithChild({
+    suite: 'slow',
+    actor: 'run-slow-tests',
+    child: { status: 0, stdout: tapSummary({ tests: 2, pass: 2, fail: 0 }), stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].layer, 'slow');
+  assert.equal(fixture.artifacts[0].executor, 'run-slow-tests');
+  assert.equal(fixture.calls.filter((call) => call.type === 'spawn').length, 1);
+});
+
+test('runTests: slow suiteの個別指定はtests/slow直下以外を起動しない', () => {
+  for (const testFiles of [
+    ['tests/process-lifecycle.test.js'],
+    ['tests/slow/../process-lifecycle.test.js'],
+    ['C:/repo/tests/slow/process-lifecycle.test.js'],
+  ]) {
+    let spawned = false;
+    const result = runTests(
+      { suite: 'slow', testFiles, cwd: tempWorktree(), env: { GH_MAESTRO_TEST_ACTOR: 'poll-pr' } },
+      { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
+    );
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.artifact, null);
+    assert.equal(spawned, false);
+    assert.match(result.stderr, /tests\/slow\/\<name\>\.test\.js|不正なパス要素|相対パス/);
+  }
+});
+
+test('runTests: full suiteへの個別ファイル指定は起動しない', () => {
+  let spawned = false;
+  const result = runTests(
+    { suite: 'full', testFiles: ['tests/slow/process-lifecycle.test.js'], cwd: tempWorktree(), env: {} },
+    { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.artifact, null);
+  assert.equal(spawned, false);
+  assert.match(result.stderr, /partial 層/);
+});
+
+test('runTests: summaryが欠落しても終了コード0なら件数なしのpass成果物を作る', () => {
+  const fixture = runWithChild({
+    child: { status: 0, stdout: 'runner does not emit TAP\n', stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'pass');
+  assert.equal('tests' in fixture.artifacts[0], false);
+  assert.equal('pass' in fixture.artifacts[0], false);
+  assert.equal('fail' in fixture.artifacts[0], false);
+
+  const failed = runWithChild({
+    child: { status: 3, stdout: 'runner reports failure in its own format\n', stderr: '' },
+  });
+  assert.equal(failed.result.exitCode, 3);
+  assert.equal(failed.artifacts[0].status, 'complete');
+  assert.equal(failed.artifacts[0].outcome, 'fail');
+  assert.equal('tests' in failed.artifacts[0], false);
+  assert.equal('pass' in failed.artifacts[0], false);
+  assert.equal('fail' in failed.artifacts[0], false);
+
+  const inconsistentSummary = runWithChild({
+    child: { status: 0, stdout: tapSummary({ tests: 2, pass: 2, fail: 1 }), stderr: '' },
+  });
+  assert.equal(inconsistentSummary.result.exitCode, 0);
+  assert.equal(inconsistentSummary.artifacts[0].outcome, 'pass');
+  assert.equal('tests' in inconsistentSummary.artifacts[0], false);
+});
+
+test('runTests: モジュール解決エラーでテスト開始前に終了したらunavailableと診断を保存する', () => {
+  const fixture = runWithChild({
+    child: {
+      status: 1,
+      stdout: '',
+      stderr: "Error: Cannot find module './tests/_env-setup.js'\n",
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
+  assert.match(fixture.artifacts[0].reason, /command: npm test/);
+  assert.match(fixture.artifacts[0].reason, /cause: module-not-found/);
+  assert.doesNotMatch(fixture.artifacts[0].reason, /Cannot find module|_env-setup/);
+});
+
+test('runTests: テスト件数ありのTAP失敗は起動エラー文言を含んでもfailのまま保持する', () => {
+  const fixture = runWithChild({
+    child: {
+      status: 1,
+      stdout: tapSummary({ tests: 1, pass: 0, fail: 1 }),
+      stderr: "not ok 1 - test body reports Cannot find module\n",
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'complete');
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.equal(fixture.artifacts[0].tests, 1);
+});
+
+test('runTests: 出力のない非0終了はunavailableとして記録する', () => {
+  const fixture = runWithChild({
+    child: { status: 9, stdout: '', stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 9);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
+  assert.match(fixture.artifacts[0].reason, /cause: no-test-output/);
+});
+
+test('runTests: 0件のTAPで非0終了した場合はunavailableとして記録する', () => {
+  const fixture = runWithChild({
+    child: { status: 1, stdout: tapSummary({ tests: 0, pass: 0, fail: 0 }), stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.match(fixture.artifacts[0].reason, /runner-abnormal-exit/);
+});
+
+test('runTests: runner起動失敗もunavailableとして記録し、終了コード1を返す', () => {
+  const fixture = runWithChild({
+    child: { status: null, error: new Error('node executable missing'), stdout: '', stderr: '' },
+  });
+
+  assert.equal(fixture.result.exitCode, 1);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.match(fixture.artifacts[0].reason, /runner-start-failed/);
+  assert.match(fixture.artifacts[0].reason, /command: npm test/);
+  assert.match(fixture.artifacts[0].reason, /cause: runner-start-failed/);
+  assert.doesNotMatch(fixture.artifacts[0].reason, /node executable missing/);
+});
+
+test('runTests: 成果物の削除・書き出し失敗はrunner結果を隠さず、unknownマーカーを残す', () => {
+  const cleared = runWithChild({
+    child: { status: 0, stdout: '', stderr: '' },
+    extraDeps: {
+      clearArtifactFn: () => { throw new Error('old artifact locked'); },
+    },
+  });
+  assert.equal(cleared.result.exitCode, 1);
+  assert.equal(cleared.result.artifact, null);
+  assert.equal(cleared.calls.some((call) => call.type === 'spawn'), false);
+  assert.deepEqual(cleared.invalidations.map((entry) => entry.reason), ['artifact-clear-failed']);
+  assert.match(cleared.stderr, /old artifact locked/);
+
+  const fixture = runWithChild({
+    child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+    writeArtifactFn: () => { throw new Error('runtime root unavailable'); },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.result.artifactWritten, false);
+  assert.deepEqual(fixture.invalidations.map((entry) => entry.reason), ['artifact-write-failed']);
+  assert.match(fixture.stderr, /runtime root unavailable/);
+});
+
+test('runTests: テスト対象内容の指紋取得失敗はunavailableとして記録する', () => {
+  const fixture = runWithChild({
+    child: { status: 0, stdout: tapSummary({ tests: 1, pass: 1, fail: 0 }), stderr: '' },
+    extraDeps: {
+      calculateWorktreeContentHashFn: () => { throw new Error('worktree snapshot failed'); },
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.equal(fixture.artifacts[0].status, 'unavailable');
+  assert.equal(fixture.artifacts[0].reason, 'content-snapshot-failed');
+  assert.match(fixture.stderr, /worktree snapshot failed/);
+});
+
+test('runTests: 未知のsuiteを拒否し、宣言されたargv/mapping/fallbackを使う', () => {
+  let spawned = false;
+  const result = runTests(
+    { suite: 'unknown', cwd: tempWorktree(), env: {} },
+    { spawnSyncFn: () => { spawned = true; return { status: 0 }; } },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(spawned, false);
+  assert.match(result.stderr, /未知のテストスイート/);
+
+  const custom = runWithChild({
+    layer: 'every',
+    child: { status: 0, stdout: 'custom runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          every: { scope: 'full', command: ['custom-runner', '--ci', 'value with spaces'] },
+        },
+      }),
+    },
+  });
+  const customCall = custom.calls.find((call) => call.type === 'spawn');
+  assert.equal(customCall.command, 'custom-runner');
+  assert.deepEqual(customCall.args, ['--ci', 'value with spaces']);
+  assert.equal(customCall.options.shell, false);
+  assert.equal(custom.artifacts[0].outcome, 'pass');
+
+  const declaredNode = runWithChild({
+    child: { status: 0, stdout: 'node runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          full: { scope: 'full', command: ['node', '--test', 'tests/declared.test.js'] },
+        },
+      }),
+    },
+  });
+  const declaredNodeCall = declaredNode.calls.find((call) => call.type === 'spawn');
+  assert.equal(declaredNodeCall.command, 'node');
+  assert.deepEqual(declaredNodeCall.args, ['--test', 'tests/declared.test.js']);
+  assert.equal(declaredNode.artifacts[0].outcome, 'pass');
+
+  const partial = runWithChild({
+    layer: 'changed',
+    changedFiles: ['src/widget.js'],
+    child: { status: 0, stdout: 'partial runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          changed: {
+            scope: 'partial',
+            command: ['partial-runner', '--partial'],
+            fileArgs: ['--files'],
+            mapping: [{ changed: 'src/<name>.js', test: 'checks/<name>.test.js' }],
+          },
+        },
+      }),
+    },
+  });
+  const partialCall = partial.calls.find((call) => call.type === 'spawn');
+  assert.equal(partialCall.command, 'partial-runner');
+  assert.deepEqual(partialCall.args, ['--partial', '--files', 'checks/widget.test.js']);
+  assert.equal(partial.artifacts[0].scope, 'partial');
+
+  const fallback = runWithChild({
+    layer: 'changed',
+    changedFiles: ['docs/readme.md'],
+    child: { status: 0, stdout: 'full runner passed\n', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: () => ({
+        source: 'declared',
+        layers: {
+          every: { scope: 'full', command: ['full-runner', '--all'] },
+          changed: {
+            scope: 'partial',
+            command: ['partial-runner', '--changed'],
+            mapping: [{ changed: 'src/<name>.js', test: 'checks/<name>.test.js' }],
+          },
+        },
+      }),
+    },
+  });
+  const fallbackCall = fallback.calls.find((call) => call.type === 'spawn');
+  assert.equal(fallbackCall.command, 'full-runner');
+  assert.deepEqual(fallbackCall.args, ['--all']);
+  assert.equal(fallback.artifacts[0].scope, 'full');
+
+  const caller = tempWorktree();
+  const project = tempWorktree();
+  const configWorkspaces = [];
+  const workspace = runWithChild({
+    cwd: caller,
+    workspace: project,
+    child: { status: 0, stdout: '', stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: ({ workspace: resolvedWorkspace }) => {
+        configWorkspaces.push(resolvedWorkspace);
+        return {
+          source: 'declared',
+          layers: { full: { scope: 'full', command: ['custom-runner'] } },
+        };
+      },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
+  });
+  assert.deepEqual(configWorkspaces, [project]);
+  assert.deepEqual(
+    workspace.calls.filter((call) => ['clear', 'head', 'hash'].includes(call.type))
+      .map((call) => call.worktree),
+    [caller, caller, caller],
+  );
+  assert.equal(workspace.calls.find((call) => call.type === 'spawn').options.cwd, caller);
+  assert.equal(workspace.writes[0].worktree, caller);
+});
+
+test('runTests: GH_MAESTRO_WORKSPACE が本体を指していても、明示指定と省略の両方でworktreeを実行対象にする', () => {
+  for (const [mode, workspaceArg] of [
+    ['明示した設定workspace', 'explicit'],
+    ['継承した設定workspace', undefined],
+  ]) {
+    const executionWorktree = tempWorktree();
+    const configWorkspace = tempWorktree();
+    const resolvedConfigWorkspaces = [];
+    const fixture = runWithChild({
+      cwd: executionWorktree,
+      workspace: workspaceArg === 'explicit' ? configWorkspace : undefined,
+      env: { GH_MAESTRO_WORKSPACE: configWorkspace },
+      child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+      extraDeps: {
+        resolveTestConfigFn: ({ workspace }) => {
+          resolvedConfigWorkspaces.push(workspace);
+          return {
+            source: 'declared',
+            layers: { full: { scope: 'full', command: ['custom-runner'] } },
+          };
+        },
+        lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+      },
+    });
+
+    assert.equal(fixture.result.exitCode, 0, `${mode}で実行に失敗しました: ${fixture.result.stderr}`);
+    assert.deepEqual(resolvedConfigWorkspaces, [configWorkspace]);
+    assert.deepEqual(
+      fixture.calls.filter((call) => ['clear', 'head', 'hash'].includes(call.type))
+        .map((call) => call.worktree),
+      [executionWorktree, executionWorktree, executionWorktree],
+    );
+    assert.equal(fixture.calls.find((call) => call.type === 'spawn').options.cwd, executionWorktree);
+    assert.equal(fixture.writes[0].worktree, executionWorktree);
+    assert.equal(fixture.artifacts[0].testedHead, SHA);
+  }
+});
+
+test('runTests: slow層も設定workspaceではなく実行worktreeへ成果物を書く', () => {
+  const executionWorktree = tempWorktree();
+  const configWorkspace = tempWorktree();
+  const resolvedConfigWorkspaces = [];
+  const fixture = runWithChild({
+    suite: 'slow',
+    cwd: executionWorktree,
+    workspace: configWorkspace,
+    env: { GH_MAESTRO_WORKSPACE: configWorkspace },
+    actor: 'poll-pr',
+    child: { status: 0, stdout: `TAP version 13\n${tapSummary({ tests: 1, pass: 1, fail: 0 })}`, stderr: '' },
+    extraDeps: {
+      resolveTestConfigFn: ({ workspace }) => {
+        resolvedConfigWorkspaces.push(workspace);
+        return {
+          source: 'declared',
+          layers: { slow: { scope: 'partial', command: ['slow-runner'] } },
+        };
+      },
+      lintSpawnSyncFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+    },
+  });
+
+  assert.equal(fixture.result.exitCode, 0);
+  assert.deepEqual(resolvedConfigWorkspaces, [configWorkspace]);
+  assert.equal(fixture.calls.find((call) => call.type === 'spawn').options.cwd, executionWorktree);
+  assert.equal(fixture.writes[0].worktree, executionWorktree);
+  assert.equal(fixture.artifacts[0].scope, 'partial');
+});
+
+test('main: --helpは実runnerを起動せずusageを返す', () => {
+  const result = main(['--help']);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, USAGE);
+  assert.match(result.stdout, /--list/);
+  assert.match(result.stdout, /dynamicConcurrency/);
+  assert.match(result.stdout, /review-job数 \* reviewJobCost/);
+  assert.match(result.stdout, /GH_MAESTRO_RUNTIME_WORKSPACE/);
+
+  const calls = [];
+  const changed = main(['--changed', 'changed', 'src/widget.js'], {
+    resolveTestConfigFn: () => ({
+      source: 'declared',
+      layers: {
+        every: { scope: 'full', command: ['full-runner'] },
+        changed: {
+          scope: 'partial',
+          command: ['partial-runner', '--partial'],
+          mapping: [{ changed: 'src/<name>.js', test: 'checks/<name>.test.js' }],
+        },
+      },
+    }),
+    clearArtifactFn: () => {},
+    resolveGitHeadFn: () => SHA,
+    calculateWorktreeContentHashFn: () => CONTENT_HASH,
+    spawnSyncFn: (command, args) => {
+      calls.push({ command, args });
+      return { status: 0, stdout: '', stderr: '' };
+    },
+    writeArtifactFn: () => {},
+  });
+  assert.equal(changed.exitCode, 0);
+  assert.deepEqual(calls, [{
+    command: 'partial-runner',
+    args: ['--partial', 'checks/widget.test.js'],
+  }]);
+});
+
+test('listTestLayers: 宣言済み層のnameとscopeだけをJSONで返す', () => {
+  const workspace = tempWorktree();
+  const home = tempWorktree();
+  writeWorkspaceConfig(workspace, {
+    test: {
+      layers: {
+        all: {
+          scope: 'full',
+          command: ['secret-runner', '--secret-arg'],
+          defaultTestFiles: ['tests/SECRET_DEFAULT.test.js'],
+        },
+        changed: {
+          scope: 'partial',
+          command: ['partial-secret-runner'],
+          defaultTestFiles: ['tests/SECRET_DEFAULT_PARTIAL.test.js'],
+          mapping: [{
+            changed: 'src/SECRET_CHANGED.js',
+            test: 'tests/SECRET_CHANGED.test.js',
+          }],
+        },
+      },
+    },
+  });
+
+  const result = listTestLayers({ workspace, homedir: home });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'declared',
+    layers: [
+      { name: 'all', scope: 'full' },
+      { name: 'changed', scope: 'partial' },
+    ],
+  });
+  for (const secret of [
+    'secret-runner',
+    '--secret-arg',
+    'partial-secret-runner',
+    'SECRET_DEFAULT',
+    'SECRET_CHANGED',
+    'mapping',
+  ]) {
+    assert.doesNotMatch(result.stdout, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
+
+test('listTestLayers: 呼び出し側のenvからworkspaceを解決する', () => {
+  const workspace = tempWorktree();
+  const home = tempWorktree();
+  writeWorkspaceConfig(workspace, {
+    test: {
+      layers: {
+        custom: {
+          scope: 'full',
+          command: ['custom-runner'],
+        },
+      },
+    },
+  });
+
+  const result = listTestLayers({
+    cwd: tempWorktree(),
+    homedir: home,
+    env: { GH_MAESTRO_WORKSPACE: workspace },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'declared',
+    layers: [{ name: 'custom', scope: 'full' }],
+  });
+});
+
+test('listTestLayers: 宣言が無いworkspaceはmissingと終了コード2を返す', () => {
+  const result = listTestLayers({ workspace: tempWorktree(), homedir: tempWorktree() });
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(JSON.parse(result.stdout), { status: 'missing', layers: [] });
+  assert.equal(result.stderr, '');
+});
+
+test('listTestLayers: 不正な宣言は詳細を出さずinvalidと終了コード1を返す', () => {
+  const workspace = tempWorktree();
+  const home = tempWorktree();
+  writeWorkspaceConfig(workspace, { test: { layers: [] } });
+
+  const result = listTestLayers({ workspace, homedir: home });
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(JSON.parse(result.stdout), { status: 'invalid', layers: [] });
+  assert.match(result.stderr, /解決できません/);
+  assert.doesNotMatch(result.stderr, /config\.json/);
+});
+
+test('main: --listは層を実行せず、slow層の認可経路を通らない', () => {
+  let spawned = false;
+  const result = main(['--list'], {
+    resolveTestConfigFn: () => ({
+      source: 'declared',
+      layers: { slow: { scope: 'partial', command: ['slow-runner'] } },
+    }),
+    spawnSyncFn: () => {
+      spawned = true;
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'declared',
+    layers: [{ name: 'slow', scope: 'partial' }],
+  });
+  assert.equal(spawned, false);
+});
+
+test('main: --listは層名や--changedとの併用を拒否する', () => {
+  for (const argv of [
+    ['--list', 'full'],
+    ['--list', '--changed'],
+  ]) {
+    const result = main(argv);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /--list/);
+    assert.match(result.stderr, /Usage/);
+  }
+});
+
+test('main: 未知のsuiteはエラーをstderrへ返す', () => {
+  const result = main(['unknown']);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /未知のテストスイート/);
+});
+
+function tapFailureBlock(name, index, { expected, actual }) {
+  return `# Subtest: ${name}
+not ok ${index} - ${name}
+  ---
+  duration_ms: 1.0
+  type: 'test'
+  location: '/work/fixtures/${name.replaceAll(' ', '-')}.test.js:3:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    mismatch for ${name}
+  code: 'ERR_ASSERTION'
+  expected: ${expected}
+  actual: ${actual}
+  ...
+`;
+}
+
+test('runTests: slow層の失敗は場所・エラー・期待値・実際値を成果物のfailureDetailsに残す', () => {
+  const tapOutput = tapFailureBlock('slow one', 1, { expected: 3, actual: 2 })
+    + tapFailureBlock('slow two', 2, { expected: 'x', actual: 'y' })
+    + tapSummary({ tests: 2, pass: 0, fail: 2 });
+  const fixture = runWithChild({
+    suite: 'slow',
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.deepEqual(fixture.artifacts[0].failureDetails, [
+    { name: 'slow one', location: '/work/fixtures/slow-one.test.js:3:1', error: 'mismatch for slow one', expected: '3', actual: '2' },
+    { name: 'slow two', location: '/work/fixtures/slow-two.test.js:3:1', error: 'mismatch for slow two', expected: 'x', actual: 'y' },
+  ]);
+});
+
+test('runTests: slow層の失敗の中身は5件までに抑える', () => {
+  const tapOutput = Array.from({ length: 7 }, (_, i) => tapFailureBlock(`case ${i + 1}`, i + 1, { expected: 1, actual: 0 })).join('')
+    + tapSummary({ tests: 7, pass: 0, fail: 7 });
+  const fixture = runWithChild({
+    suite: 'slow',
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.artifacts[0].failureDetails.length, 5);
+  assert.equal(fixture.artifacts[0].failedTests.length, 7, '名前は従来どおり全件のまま');
+});
+
+test('runTests: full層の成果物には失敗の中身を載せない（full層の出力は増やさない）', () => {
+  const tapOutput = tapFailureBlock('full one', 1, { expected: 3, actual: 2 })
+    + tapSummary({ tests: 1, pass: 0, fail: 1 });
+  const fixture = runWithChild({
+    child: { status: 1, stdout: tapOutput, stderr: '' },
+  });
+
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+  assert.deepEqual(fixture.artifacts[0].failedTests, ['full one']);
+  assert.equal('failureDetails' in fixture.artifacts[0], false);
+});
+
+test('runTests→申告: 実際の node:test の失敗出力の中身が、成果物と読み取りを経て申告の本文に載り、絶対パスは載らない', () => {
+  const worktree = tempWorktree();
+  // 実機の node:test（--test-reporter=tap）の出力。場所だけを実行時の worktree に置き換える。
+  // Windows の実出力は場所の区切りが二重の \\ になるため、同じ形に揃える。
+  const captured = fs.readFileSync(path.join(__dirname, 'fixtures', 'node-test-tap-failures.txt'), 'utf8');
+  const tap = captured.replaceAll('__WORKTREE__', worktree.replace(/\\/g, '\\\\'));
+  const fixture = runWithChild({
+    suite: 'slow',
+    cwd: worktree,
+    child: { status: 1, stdout: tap, stderr: '' },
+  });
+  assert.equal(fixture.artifacts[0].outcome, 'fail');
+
+  writeTestResultLayer(worktree, fixture.artifacts[0]);
+  const read = readTestResultArtifact(worktree);
+  assert.equal(read.ok, true);
+  const body = buildCommentBody({ commit: SHA, worktree, testResult: { provenance: 'test-runner', scope: 'aggregate', layers: read.result.layers } });
+
+  assert.ok(body.includes('失敗詳細: `alpha fails` / 場所: `tests/f.test.js:3:1`'), body);
+  assert.ok(body.includes('エラー: `sum mismatch ⏎ 2 !== 3`'), body);
+  assert.ok(body.includes('期待値: `3` / 実際値: `2`'), body);
+  assert.ok(body.includes('失敗詳細: `beta fails` / 場所: `tests/f.test.js:4:1`'), body);
+  assert.ok(body.includes('期待値: `a: 2` / 実際値: `a: 1`'), body);
+  assert.ok(!body.includes(worktree), '絶対パスを載せない');
+  assert.ok(!body.includes(worktree.replace(/\\/g, '\\\\')), '二重区切りの絶対パスも載せない');
+});

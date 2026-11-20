@@ -1,0 +1,1490 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const {
+  resolveAgentConfig,
+  resolveTestConfig,
+  getTestLayerDeclarationStatus,
+  resolveSkillAgentMap,
+  resolveCouncilConfig,
+  resolveExtends,
+  loadDefaults,
+  validateNonInteractiveTokens,
+} = require('../scripts/shared/resolve-config');
+const { buildAgentCommandArgs, buildAgentExecArgs, selectAgentConfigForModelPhase } = require('../scripts/shared/agent-launch');
+const { createSessionResumeAdapter } = require('../scripts/shared/inbox-adapters/session-resume-adapter');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+
+// 一時ディレクトリは共有スコープが所有し、テストファイル終了時に削除する。
+const tempDirScope = createTempDirScope();
+test.after(() => tempDirScope.cleanup());
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function withTempHome(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-resolve-config-'));
+  try {
+    return fn(dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function writeConfig(home, data) {
+  fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.gh-maestro', 'config.json'),
+    JSON.stringify(data, null, 2),
+    'utf8',
+  );
+}
+
+function writeWorkspaceConfig(ws, data) {
+  fs.mkdirSync(path.join(ws, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(
+    path.join(ws, '.gh-maestro', 'config.json'),
+    JSON.stringify(data, null, 2),
+    'utf8',
+  );
+}
+
+function assertTestConfigResolution(home) {
+  const builtin = resolveTestConfig({ homedir: home });
+  assert.equal(builtin.source, 'builtin');
+  assert.deepEqual(Object.keys(builtin.layers), ['full', 'slow']);
+  assert.equal(builtin.layers.full.scope, 'full');
+  assert.equal(builtin.layers.full.displayCommand, 'npm test');
+  assert.equal(builtin.layers.full.command[0], process.execPath);
+  assert.equal(builtin.layers.slow.scope, 'partial');
+  assert.equal(builtin.layers.slow.displayCommand, 'npm run test:slow');
+
+  writeConfig(home, {
+    test: {
+      layers: {
+        full: { command: ['node', 'custom-full-runner.js'] },
+      },
+    },
+  });
+  const builtinLayerOverride = resolveTestConfig({ homedir: home });
+  assert.deepEqual(Object.keys(builtinLayerOverride.layers), ['full']);
+  assert.deepEqual(builtinLayerOverride.layers.full.command, ['node', 'custom-full-runner.js']);
+  assert.equal(builtinLayerOverride.layers.full.scope, 'full');
+  assert.equal(builtinLayerOverride.layers.full.displayCommand, 'npm test');
+
+  writeConfig(home, {
+    test: {
+      layers: {
+        every: {
+          scope: 'full',
+          command: ['node', 'global-runner.js'],
+          displayCommand: 'node global-runner.js',
+          fileArgs: ['--project'],
+        },
+      },
+    },
+  });
+  const global = resolveTestConfig({ homedir: home });
+  assert.equal(global.source, 'declared');
+  assert.deepEqual(Object.keys(global.layers), ['every']);
+  assert.deepEqual(global.layers.every.command, ['node', 'global-runner.js']);
+  assert.deepEqual(global.layers.every.fileArgs, ['--project']);
+
+  const workspace = path.join(home, 'workspace');
+  writeWorkspaceConfig(workspace, {
+    test: {
+      layers: {
+        every: {
+          command: [process.execPath, 'workspace-runner.js'],
+          mapping: [{ changed: 'src/<name>.js', test: 'tests/<name>.test.js' }],
+        },
+      },
+    },
+  });
+  const cascaded = resolveTestConfig({ homedir: home, workspace });
+  assert.deepEqual(cascaded.layers.every.command, [process.execPath, 'workspace-runner.js']);
+  assert.equal(cascaded.layers.every.displayCommand, 'node global-runner.js');
+  assert.deepEqual(cascaded.layers.every.fileArgs, ['--project']);
+  assert.deepEqual(cascaded.layers.every.mapping, [
+    { changed: 'src/<name>.js', test: 'tests/<name>.test.js' },
+  ]);
+
+  for (const layer of [
+    { every: { command: 'node runner.js' } },
+    { every: { command: [] } },
+    { every: { command: ['node', 'runner.js'], shell: true } },
+    { every: { command: ['node', 'runner.js'], mapping: [{ changed: '../src/<name>.js', test: 'tests/<name>.test.js' }] } },
+  ]) {
+    writeConfig(home, { test: { layers: layer } });
+    assert.equal(resolveTestConfig({ homedir: home }), null);
+  }
+}
+
+test('getTestLayerDeclarationStatus: 組み込み値だけならmissingを返す', () => {
+  withTempHome(home => {
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'missing');
+  });
+});
+
+test('resolveTestConfig: dynamicConcurrencyのargvと調整値を検証して保持する', () => {
+  withTempHome(home => {
+    const workspace = path.join(home, 'workspace');
+    const dynamicConcurrency = {
+      args: ['--test-concurrency={value}'],
+      cpuReserve: 1,
+      reviewJobCost: 2,
+      minimum: 1,
+    };
+    writeWorkspaceConfig(workspace, {
+      test: { layers: { slow: { dynamicConcurrency } } },
+    });
+
+    const resolved = resolveTestConfig({ homedir: home, workspace });
+    assert.deepEqual(resolved.layers.slow.dynamicConcurrency, dynamicConcurrency);
+
+    for (const invalid of [
+      { ...dynamicConcurrency, args: ['--jobs'] },
+      { ...dynamicConcurrency, args: ['--jobs={value}', '--parallel={value}'] },
+      { ...dynamicConcurrency, cpuReserve: -1 },
+      { ...dynamicConcurrency, reviewJobCost: 0 },
+      { ...dynamicConcurrency, minimum: 0 },
+    ]) {
+      writeWorkspaceConfig(workspace, {
+        test: { layers: { slow: { dynamicConcurrency: invalid } } },
+      });
+      assert.equal(resolveTestConfig({ homedir: home, workspace }), null);
+    }
+  });
+});
+
+test('getTestLayerDeclarationStatus: global/workspaceの有効な宣言をdeclaredとして返す', () => {
+  withTempHome(home => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-status-ws-'));
+    try {
+      writeConfig(home, {
+        test: {
+          layers: {
+            every: { command: ['node', 'global-runner.js'] },
+          },
+        },
+      });
+      assert.equal(getTestLayerDeclarationStatus({ homedir: home, workspace }), 'declared');
+
+      writeWorkspaceConfig(workspace, {
+        test: {
+          layers: {
+            every: { command: ['node', 'workspace-runner.js'] },
+          },
+        },
+      });
+      assert.equal(getTestLayerDeclarationStatus({ homedir: home, workspace }), 'declared');
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+test('getTestLayerDeclarationStatus: 壊れたtest.layersはinvalidを返し、例外を外へ出さない', () => {
+  withTempHome(home => {
+    writeConfig(home, { test: { layers: [] } });
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'invalid');
+  });
+});
+
+test('getTestLayerDeclarationStatus: config.jsonのJSON破損とトップレベル非objectはinvalidを返す', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+
+    fs.writeFileSync(configPath, '{ broken', 'utf8');
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'invalid');
+
+    fs.writeFileSync(configPath, JSON.stringify([]), 'utf8');
+    assert.equal(getTestLayerDeclarationStatus({ homedir: home }), 'invalid');
+  });
+});
+
+// ── loadDefaults ─────────────────────────────────────────────────────────────
+
+test('loadDefaults: agent-defaults.json を読める', () => {
+  const defaults = loadDefaults();
+  assert.ok(Array.isArray(defaults.agents), 'agents should be an array');
+  assert.ok(defaults.agents.length >= 5, 'should have at least 5 agents');
+  assert.ok(typeof defaults.skillAgentMap === 'object', 'skillAgentMap should be an object');
+});
+
+test('loadDefaults: 各エージェントが id, command, runtime, promptDelivery を持つ（extends解決後）', () => {
+  const defaults = loadDefaults();
+  // claude-ds/claude-ds-pro/codex-pro のように extends で大半のフィールドを継承する
+  // エントリは、生のままだと runtime 等が無い。resolveExtends で解決した実効値を見る。
+  for (const raw of defaults.agents) {
+    const agent = resolveExtends(raw, defaults.agents);
+    assert.ok(agent.id, `agent should have id: ${JSON.stringify(agent)}`);
+    assert.ok(agent.command, `agent ${agent.id} should have command`);
+    assert.ok(agent.runtime, `agent ${agent.id} should have runtime`);
+    assert.ok(agent.promptDelivery, `agent ${agent.id} should have promptDelivery`);
+  }
+});
+
+test('loadDefaults: runtime が agents.yaml のキー (claude|agy|codex) のいずれか（extends解決後）', () => {
+  const defaults = loadDefaults();
+  const validRuntimes = new Set(['claude', 'agy', 'codex']);
+  for (const raw of defaults.agents) {
+    const agent = resolveExtends(raw, defaults.agents);
+    assert.ok(
+      validRuntimes.has(agent.runtime),
+      `agent ${agent.id}: runtime "${agent.runtime}" should be one of claude|agy|codex`,
+    );
+  }
+});
+
+test('loadDefaults: reasonix が dynamicCommand を持つ', () => {
+  const defaults = loadDefaults();
+  const reasonix = defaults.agents.find(a => a.id === 'reasonix');
+  assert.ok(reasonix, 'reasonix should exist in defaults');
+  assert.equal(reasonix.dynamicCommand, true, 'reasonix should have dynamicCommand: true');
+});
+
+// ── resolveAgentConfig ───────────────────────────────────────────────────────
+
+test('resolveAgentConfig: デフォルトからエージェントを解決できる', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.ok(agent, 'agent should be resolved');
+    assert.equal(agent.id, 'claude-ds');
+    assert.equal(agent.command, 'claude-ds');
+    assert.equal(agent.promptDelivery, 'system-prompt-file');
+  });
+});
+
+test('resolveAgentConfig: agentId が null なら null を返す', () => {
+  withTempHome(home => {
+    assert.equal(resolveAgentConfig(null, { homedir: home }), null);
+  });
+});
+
+test('resolveAgentConfig: 存在しないエージェントIDは null を返す', () => {
+  withTempHome(home => {
+    assert.equal(resolveAgentConfig('nonexistent-agent', { homedir: home }), null);
+  });
+});
+
+test('resolveAgentConfig: ~/.gh-maestro/config.json の override がデフォルトを上書きする', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'claude-ds': { command: 'pwsh', extraArgs: ['-NoLogo', '-Command', 'claude-ds-wrapper'], enterSequence: '\n' },
+      },
+    });
+
+    // workspace 未指定でも global が効く（旧 L961 の検査を統合）
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.equal(agent.command, 'pwsh');
+    assert.deepEqual(agent.extraArgs, ['-NoLogo', '-Command', 'claude-ds-wrapper']);
+    assert.equal(agent.enterSequence, '\n', 'global override should apply without a workspace');
+    // 上書きされていないフィールドはデフォルトのまま
+    assert.equal(agent.promptDelivery, 'system-prompt-file');
+  });
+});
+
+test('resolveAgentConfig: global execArgs を設定するとagent ID・config path・extraArgs案内付きで拒否する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'codex-sol': { extends: 'codex', execArgs: ['--config', 'model=gpt-6.1-sol'] },
+      },
+    });
+    const configPath = path.resolve(home, '.gh-maestro', 'config.json');
+    assert.throws(() => resolveAgentConfig('codex-sol', { homedir: home }), error => {
+      assert.match(error.message, /codex-sol/);
+      assert.ok(error.message.includes(configPath), error.message);
+      assert.match(error.message, /extraArgs/);
+      return true;
+    });
+  });
+});
+
+test('resolveAgentConfig: global extraArgs は通常・Review Managerの両方に使われる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'claude-ds-pro': {
+          command: 'pwsh',
+          extraArgs: ['-Command', 'claude-ds-pro --dangerously-skip-permissions --print --output-format stream-json --verbose'],
+        },
+      },
+    });
+    const agent = resolveAgentConfig('claude-ds-pro', { homedir: home });
+    const args = buildAgentCommandArgs({ ...agent, extraArgs: buildAgentExecArgs(agent) }, {
+      promptFile: 'C:/tmp/review-manager-prompt.md',
+      systemPromptText: 'review',
+    });
+    assert.deepEqual(args, [
+      'pwsh', '-Command', 'claude-ds-pro --dangerously-skip-permissions --print --output-format stream-json --verbose',
+      '--append-system-prompt-file', 'C:/tmp/review-manager-prompt.md', 'review',
+    ]);
+  });
+});
+test('resolveAgentConfig: workspace config が global config を上書きする', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-'));
+    try {
+      writeConfig(home, {
+        agents: { 'claude-ds': { enterSequence: '\n' } },
+      });
+      writeWorkspaceConfig(ws, {
+        agents: { 'claude-ds': { enterSequence: '\r' } },
+      });
+
+      const agent = resolveAgentConfig('claude-ds', { homedir: home, workspace: ws });
+      assert.equal(agent.enterSequence, '\r', 'workspace should win over global for non-exec fields');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: workspace config は command を上書きできない（セキュリティ）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { 'claude-ds': { command: 'malicious-cmd', extraArgs: ['--evil'] } },
+      });
+
+      const agent = resolveAgentConfig('claude-ds', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.equal(agent.command, 'claude-ds', 'workspace should not override command');
+      assert.deepEqual(
+        agent.extraArgs,
+        ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose'],
+        'workspace should not override extraArgs'
+      );
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: workspace config は execArgs も上書きできない（セキュリティ, PR #103 Review Manager指摘）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-execargs-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { codex: { execArgs: ['exec', '--sandbox', 'danger-full-access'] } },
+      });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.deepEqual(agent.execArgs, ['--cd', '{workspace}'], 'workspace should not replace route-specific arguments');
+      assert.ok(agent.extraArgs.includes('--skip-git-repo-check'), 'shared safety arguments should remain in extraArgs');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: workspace config は planExtraArgs を上書きできない', () => {
+  withTempHome(home => {
+    const ws = tempDirScope.mkdtemp('gh-maestro-ws-plan-args-');
+    try {
+      writeConfig(home, { agents: { codex: { planExtraArgs: ['exec', '--model', 'trusted-plan'] } } });
+      writeWorkspaceConfig(ws, { agents: { codex: { planExtraArgs: ['exec', '--model', 'workspace-value'] } } });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.deepEqual(agent.planExtraArgs, ['exec', '--model', 'trusted-plan']);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: 不正 planExtraArgs は警告して同じレイヤーの extraArgs に戻し config.json を変更しない', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    const badValues = [true, ['--model', 7]];
+    for (const planExtraArgs of badValues) {
+      writeConfig(home, {
+        agents: {
+          'agy-plan': {
+            extends: 'agy',
+            extraArgs: ['--model', 'flash'],
+            planExtraArgs,
+          },
+        },
+      });
+      const before = fs.readFileSync(configPath, 'utf8');
+      const warnings = [];
+      const agent = resolveAgentConfig('agy-plan', { homedir: home, warnFn: message => warnings.push(message) });
+
+      assert.deepEqual(agent.resolvedPhaseArgs.planning, [
+        '--dangerously-skip-permissions', '--model', 'flash',
+      ]);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /agents\["agy-plan"\]\.planExtraArgs/);
+      assert.match(warnings[0], /extraArgs を計画用引数として使います/);
+      assert.equal(fs.readFileSync(configPath, 'utf8'), before);
+    }
+  });
+});
+
+test('resolveAgentConfig: extends layers keep base args and replace only the owning layer during planning', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'agy-flash': {
+          extends: 'agy',
+          extraArgs: ['--model', 'gemini-3.8-flash-medium'],
+          planExtraArgs: ['--model', 'gemini-4-argon-low'],
+        },
+      },
+    });
+
+    const agent = resolveAgentConfig('agy-flash', { homedir: home });
+    const baseArgs = ['--dangerously-skip-permissions'];
+    const normalArgs = [...baseArgs, '--model', 'gemini-3.8-flash-medium'];
+    const planArgs = [...baseArgs, '--model', 'gemini-4-argon-low'];
+
+    assert.deepEqual(agent.layers, [
+      { id: 'agy', extraArgs: baseArgs },
+      {
+        id: 'agy-flash',
+        extraArgs: ['--model', 'gemini-3.8-flash-medium'],
+        planExtraArgs: ['--model', 'gemini-4-argon-low'],
+      },
+    ]);
+    assert.deepEqual(agent.extraArgs, normalArgs, 'legacy readers keep the usual flattened args');
+    assert.deepEqual(agent.resolvedPhaseArgs, { default: normalArgs, planning: planArgs });
+
+    const selected = selectAgentConfigForModelPhase(agent, 'planning');
+    assert.deepEqual(selected.extraArgs, planArgs);
+    assert.deepEqual(buildAgentCommandArgs(selected, { shortPrompt: 'plan' }), [
+      'agy', ...planArgs, '--print', 'plan',
+    ]);
+  });
+});
+
+test('resolveAgentConfig: planExtraArgs-only override retains the existing default extends layers', () => {
+  withTempHome(home => {
+    writeConfig(home, { agents: { 'claude-ds': { planExtraArgs: ['--model', 'haiku'] } } });
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+
+    assert.deepEqual(agent.extraArgs, [
+      '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose',
+    ]);
+    assert.deepEqual(agent.resolvedPhaseArgs.planning, [
+      '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose', '--model', 'haiku',
+    ]);
+  });
+});
+
+test('resolveAgentConfig: planning keeps Codex and Claude required base arguments; dynamic command prefixes both phases', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'codex-plan': {
+          extends: 'codex',
+          extraArgs: ['--config', 'model=implementation'],
+          planExtraArgs: ['--config', 'model=planning'],
+        },
+        'claude-plan': {
+          extends: 'claude',
+          extraArgs: ['--model', 'haiku'],
+          planExtraArgs: ['--model', 'sonnet'],
+        },
+        reasonix: { planExtraArgs: ['--planning-only'] },
+      },
+    });
+
+    const codex = resolveAgentConfig('codex-plan', { homedir: home });
+    assert.deepEqual(codex.resolvedPhaseArgs.planning, [
+      'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox',
+      '--config', 'model=planning',
+    ]);
+    assert.ok(codex.resolvedPhaseArgs.planning.includes('exec'));
+    assert.deepEqual(codex.extraArgs, codex.resolvedPhaseArgs.default);
+
+    const claude = resolveAgentConfig('claude-plan', { homedir: home });
+    assert.deepEqual(claude.resolvedPhaseArgs.planning, [
+      '--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose',
+      '--model', 'sonnet',
+    ]);
+    assert.ok(claude.resolvedPhaseArgs.planning.includes('--print'));
+    assert.ok(claude.resolvedPhaseArgs.planning.includes('--dangerously-skip-permissions'));
+    assert.deepEqual(claude.extraArgs, claude.resolvedPhaseArgs.default);
+
+    const reasonix = resolveAgentConfig('reasonix', { homedir: home });
+    assert.deepEqual(reasonix.extraArgs, reasonix.resolvedPhaseArgs.default);
+    assert.deepEqual(reasonix.resolvedPhaseArgs.planning, [
+      ...reasonix.resolvedPhaseArgs.default,
+      '--planning-only',
+    ]);
+    if (reasonix.command === 'node') {
+      assert.ok(reasonix.resolvedPhaseArgs.default[0].endsWith('reasonix.js'));
+      assert.equal(reasonix.resolvedPhaseArgs.planning[0], reasonix.resolvedPhaseArgs.default[0]);
+    }
+  });
+});
+
+test('resolveAgentConfig: workspace config は Review Manager用プロンプト設定を上書きできない（セキュリティ）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-exec-prompt-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { agy: { execPromptDelivery: 'positional', execPromptFlag: '--malicious' } },
+      });
+
+      const agent = resolveAgentConfig('agy', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.equal(agent.execPromptDelivery, 'flag');
+      assert.equal(agent.execPromptFlag, '--print');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+test('resolveAgentConfig: workspace config は resumeCommand も上書きできない（セキュリティ, Issue \\#132）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-sec-resume-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { codex: { resumeCommand: ['exec', 'resume', '--dangerous'] } },
+      });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.ok(
+        !agent.resumeCommand.includes('--dangerous'),
+        'workspace should not be able to inject dangerous flags via resumeCommand',
+      );
+      assert.ok(agent.resumeCommand.includes('--last'), 'default resumeCommand should be preserved');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: workspace config が command/extraArgs 以外は上書きできる', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-safe-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { 'claude-ds': { sendTextDelayMs: 9999, enterSequence: '\r' } },
+      });
+
+      const agent = resolveAgentConfig('claude-ds', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.equal(agent.command, 'claude-ds', 'command unchanged');
+      assert.equal(agent.sendTextDelayMs, 9999, 'non-exec field overridable');
+      assert.equal(agent.enterSequence, '\r', 'non-exec field overridable');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── extends（4種のCLIランタイム以外はモデル違いのラッパーに過ぎない、という運用実態への対応） ──
+
+test('resolveExtends: extends が無ければそのまま返す', () => {
+  const defaults = loadDefaults();
+  const entry = { id: 'x', command: 'x' };
+  assert.equal(resolveExtends(entry, defaults.agents), entry);
+});
+
+test('resolveExtends: agent-defaults.json自身のclaude-ds-pro/codex-proがclaude/codexを正しく継承している', () => {
+  withTempHome(home => {
+    const dsPro = resolveAgentConfig('claude-ds-pro', { homedir: home });
+    assert.equal(dsPro.id, 'claude-ds-pro');
+    assert.equal(dsPro.command, 'claude-ds-pro');
+    assert.equal(dsPro.promptDelivery, 'system-prompt-file');
+    assert.equal(dsPro.rulesSupported, true);
+    assert.deepEqual(dsPro.resumeCommand, ['--continue']);
+
+    const codexPro = resolveAgentConfig('codex-pro', { homedir: home });
+    assert.equal(codexPro.id, 'codex-pro');
+    assert.equal(codexPro.command, 'codex-pro');
+    assert.equal(codexPro.promptDelivery, 'positional');
+    assert.deepEqual(codexPro.resumeCommand, ['resume', '--last']);
+    assert.ok(codexPro.extraArgs.includes('--skip-git-repo-check'));
+  });
+});
+
+test('resolveAgentConfig: ~/.gh-maestro/config.json だけで定義したextendsベースのカスタムエージェントを解決できる（agent-defaults.jsonへの追記不要）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'codex-terra': { extends: 'codex', command: 'codex-terra' },
+      },
+    });
+
+    const agent = resolveAgentConfig('codex-terra', { homedir: home });
+    assert.ok(agent);
+    // idは常に呼び出し元が要求したagentIdに固定される（継承元のidを引きずらない。
+    // さもないとworkers.json経由のresumeで継承元そのものを起動してしまう）
+    assert.equal(agent.id, 'codex-terra');
+    assert.equal(agent.command, 'codex-terra');
+    assert.equal(agent.promptDelivery, 'positional');
+    assert.deepEqual(agent.resumeCommand, ['resume', '--last']);
+  });
+});
+
+test('resolveAgentConfig: extends先が存在しないIDだとnullを返す（isValidAgentConfigが不完全な結果を弾く）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: { 'broken-agent': { extends: 'no-such-agent' } },
+    });
+    assert.equal(resolveAgentConfig('broken-agent', { homedir: home }), null);
+  });
+});
+
+test('resolveExtends: 循環参照はフェイルクローズする（無限再帰せず不完全な結果を返す）', () => {
+  const cyclic = [
+    { id: 'a', command: 'a', extends: 'b' },
+    { id: 'b', command: 'b', extends: 'a' },
+  ];
+  const resolved = resolveExtends(cyclic[0], cyclic);
+  // 循環検出時点のエントリ自身のフィールドのみが残り、無限再帰しない
+  assert.equal(resolved.id, 'a');
+  assert.ok(!('runtime' in resolved), 'circular extends should not fabricate inherited fields');
+});
+
+test('resolveAgentConfig: workspace config の extends は無視される（EXEC_SENSITIVE_FIELDS、セキュリティ）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-extends-sec-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: {
+          'workspace-only-agent': { extends: 'codex', command: 'workspace-only-agent', extraArgs: ['--evil'] },
+        },
+      });
+      // extendsが剥がされると command のみが残り、promptDelivery 等の必須フィールドが
+      // 揃わないため isValidAgentConfig で弾かれ null になる（＝丸ごと継承の抜け道にならない）。
+      // extraArgs を併せて置くのは、追記経路（旧 L651）への到達も塞がれることを同じ assert で見るため。
+      assert.equal(resolveAgentConfig('workspace-only-agent', { homedir: home, workspace: ws }), null);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── extends 時の配列追記（Issue #235） ───────────────────────────────────────
+
+test('resolveAgentConfig: extends + extraArgs は継承元配列の末尾に追記される（Issue #235 のユースケース）', () => {
+  withTempHome(home => {
+    const claudeDefault = loadDefaults().agents.find(a => a.id === 'claude').extraArgs;
+    writeConfig(home, {
+      agents: {
+        'claude-opus': { extends: 'claude', command: 'claude-opus', extraArgs: ['--model', 'opus'] },
+      },
+    });
+
+    const agent = resolveAgentConfig('claude-opus', { homedir: home });
+    assert.ok(agent);
+    assert.equal(agent.command, 'claude-opus');
+    // 実効 extraArgs = claude の全引数 + 追記分（完全置換ではない）
+    assert.deepEqual(agent.extraArgs, [...claudeDefault, '--model', 'opus']);
+    // nonInteractiveTokens の --print が保持される
+    assert.deepEqual(agent.nonInteractiveTokens, ['--print']);
+    // 非対話化トークンが欠落しない（Issue #163 ガードと整合）
+    assert.deepEqual(validateNonInteractiveTokens(agent), { valid: true, missing: [] });
+  });
+});
+
+test('resolveExtends: extraArgs/execArgs/nonInteractiveTokens を追記し、planExtraArgs は解決レイヤーで扱う', () => {
+  const defaults = loadDefaults();
+  const claude = { ...defaults.agents.find(a => a.id === 'claude'), planExtraArgs: ['--plan-base'], execArgs: ['--base-route'] };
+  const entry = {
+    id: 'derived',
+    extends: 'claude',
+    command: 'derived',
+    extraArgs: ['--model', 'opus'],
+    planExtraArgs: ['--model', 'planning'],
+    execArgs: ['--extra-exec'],
+    resumeCommand: ['--custom-resume'],
+    nonInteractiveTokens: ['--new-token'],
+  };
+  const resolved = resolveExtends(entry, [claude]);
+  assert.deepEqual(resolved.extraArgs, [...claude.extraArgs, '--model', 'opus']);
+  assert.deepEqual(resolved.planExtraArgs, ['--model', 'planning']);
+  assert.deepEqual(resolved.execArgs, [...claude.execArgs, '--extra-exec']);
+  // resumeCommand は追記されず完全置換（末尾要素をセッション参照で置換する resume() の契約と整合）
+  assert.deepEqual(resolved.resumeCommand, ['--custom-resume']);
+  assert.deepEqual(resolved.nonInteractiveTokens, [...claude.nonInteractiveTokens, '--new-token']);
+});
+
+test('resolveAgentConfig + createSessionResumeAdapter.resume: extends で resumeCommand を継承しても sessionRef 置換が末尾の --last に対して行われる', () => {
+  withTempHome(home => {
+    // codex の resumeCommand は ["resume", "--last"]。extends で追記されるのは
+    // extraArgs のみで、resumeCommand は上書きしなければ継承元のまま末尾に --last が残る。
+    writeConfig(home, {
+      agents: {
+        'codex-terra': { extends: 'codex', command: 'codex-terra', extraArgs: ['--all'] },
+      },
+    });
+
+    const agent = resolveAgentConfig('codex-terra', { homedir: home });
+    assert.ok(agent);
+    // resumeCommand は追記対象外 → 継承元のまま ["resume", "--last"]
+    assert.deepEqual(agent.resumeCommand, ['resume', '--last']);
+    // extraArgs は追記される
+    assert.ok(agent.extraArgs.includes('--all'));
+
+    const adapter = createSessionResumeAdapter(agent);
+    const result = adapter.resume('specific-session-id');
+    // resumeCommand 末尾の --last が sessionRef に置き換わる（追記された --all は
+    // extraArgs 側にあり resumeCommand に混入しない）
+    assert.deepEqual(result.args, ['resume', 'specific-session-id']);
+  });
+});
+
+test('resolveExtends: 連鎖 extends（a→b→c）で追記が継承順に累積する', () => {
+  const agents = [
+    { id: 'c', command: 'c', extraArgs: ['--c'] },
+    { id: 'b', extends: 'c', command: 'b', extraArgs: ['--b'] },
+    { id: 'a', extends: 'b', command: 'a', extraArgs: ['--a'] },
+  ];
+  const resolved = resolveExtends(agents[2], agents);
+  assert.deepEqual(resolved.extraArgs, ['--c', '--b', '--a']);
+});
+
+test('resolveExtends: 継承元に無い配列フィールドへの指定は指定分のみになる', () => {
+  const agents = [
+    { id: 'base', command: 'base', extraArgs: ['--base'] },
+    { id: 'derived', extends: 'base', command: 'derived', execArgs: ['--new-exec'] },
+  ];
+  const resolved = resolveExtends(agents[1], agents);
+  assert.deepEqual(resolved.extraArgs, ['--base']);
+  assert.deepEqual(resolved.execArgs, ['--new-exec']);
+});
+
+test('resolveExtends: 配列でない値は従来どおり置換される（後方互換）', () => {
+  const agents = [
+    { id: 'base', command: 'base', sendTextDelayMs: 1000, extraArgs: ['--base'] },
+    { id: 'derived', extends: 'base', command: 'derived', sendTextDelayMs: 5000 },
+  ];
+  const resolved = resolveExtends(agents[1], agents);
+  assert.equal(resolved.command, 'derived');
+  assert.equal(resolved.sendTextDelayMs, 5000, 'non-array value should be replaced, not appended');
+  assert.deepEqual(resolved.extraArgs, ['--base'], 'inherited array unchanged when not overridden');
+});
+
+test('resolveAgentConfig: extends なしの global override は従来どおり配列を完全置換する（非対称性・後方互換）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: { 'claude-ds': { command: 'pwsh', extraArgs: ['-NoLogo', '-Command', 'my-wrapper'] } },
+    });
+
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.ok(agent);
+    // claude-ds は claude を extends するが、この override 自身は extends を持たないため置換経路
+    assert.deepEqual(agent.extraArgs, ['-NoLogo', '-Command', 'my-wrapper'], 'non-extends override should fully replace extraArgs');
+    assert.equal(agent.extraArgs.includes('--print'), false, 'inherited --print should be gone after full replace');
+  });
+});
+
+test('resolveAgentConfig: デフォルトにないカスタムエージェントを config.json から解決できる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'my-custom-agent': { command: 'custom-cli', label: 'Custom', promptDelivery: 'flag', promptFlag: '-p' },
+      },
+    });
+
+    const agent = resolveAgentConfig('my-custom-agent', { homedir: home });
+    assert.ok(agent, 'config-only agent should be resolved');
+    assert.equal(agent.command, 'custom-cli');
+    assert.equal(agent.promptDelivery, 'flag');
+    assert.equal(agent.promptFlag, '-p');
+    assert.equal(agent.label, 'Custom');
+  });
+});
+
+test('resolveAgentConfig: config-only エージェントに workspace override が上書きされる', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-custom-'));
+    try {
+      writeConfig(home, {
+        agents: {
+          'my-agent': { command: 'global-cli', promptDelivery: 'flag', promptFlag: '-g' },
+        },
+      });
+      writeWorkspaceConfig(ws, {
+        agents: {
+          'my-agent': { promptFlag: '-w' },
+        },
+      });
+
+      const agent = resolveAgentConfig('my-agent', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      assert.equal(agent.command, 'global-cli', 'command from global preserved');
+      assert.equal(agent.promptFlag, '-w', 'promptFlag overridden by workspace');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveAgentConfig: config-only エージェントが command 欠如で null になる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'incomplete-agent': { label: 'No Command', promptDelivery: 'flag' },
+      },
+    });
+
+    const agent = resolveAgentConfig('incomplete-agent', { homedir: home });
+    assert.equal(agent, null, 'agent without command should be null');
+  });
+});
+
+test('resolveAgentConfig: config-only エージェントが promptDelivery 欠如で null になる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'incomplete-agent': { command: 'some-cli', label: 'No Delivery' },
+      },
+    });
+
+    const agent = resolveAgentConfig('incomplete-agent', { homedir: home });
+    assert.equal(agent, null, 'agent without promptDelivery should be null');
+  });
+});
+
+test('resolveAgentConfig: config.json が存在しなければデフォルトだけを使う', () => {
+  withTempHome(home => {
+    // config.json を作らない
+    const agent = resolveAgentConfig('agy', { homedir: home });
+    assert.ok(agent);
+    assert.equal(agent.command, 'agy');
+    assert.equal(agent.promptDelivery, 'flag');
+  });
+});
+
+// ── config.json の壊れ方（ADR 0053: 既定値で動き、警告し、書き換えない） ──────
+
+/** fn 実行中に stderr へ書かれた内容を集める。戻り値は fn の結果と stderr 文字列。 */
+function captureStderr(fn) {
+  const original = process.stderr.write;
+  const chunks = [];
+  process.stderr.write = (chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    return { value: fn(), stderr: chunks.join('') };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+/** ファイルの内容を比較用に返す。ディレクトリなら 'DIR'（書き換えられていないことの確認用）。 */
+function snapshotPath(p) {
+  return fs.statSync(p).isDirectory() ? 'DIR' : fs.readFileSync(p, 'utf8');
+}
+
+test('config.json: JSON 構文エラーの global 設定は既定値で動き、警告に場所を示し、書き換えない', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ invalid json', 'utf8');
+    const before = snapshotPath(configPath);
+
+    const { value: agent, stderr } = captureStderr(() => resolveAgentConfig('agy', { homedir: home }));
+    assert.equal(agent.command, 'agy', 'should fall back to defaults');
+    assert.ok(stderr.includes(configPath), `warning must name the broken file: ${stderr}`);
+    assert.ok(stderr.includes('既定値'), `warning must say defaults are used: ${stderr}`);
+    assert.equal(snapshotPath(configPath), before, 'config.json must not be rewritten');
+  });
+});
+
+test('config.json: JSON 構文エラーの workspace 設定も既定値で動き、警告に workspace のファイルを示す', () => {
+  withTempHome(home => {
+    const ws = tempDirScope.mkdtemp('gh-maestro-resolve-config-ws-');
+    const configPath = path.join(ws, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ "agents": ', 'utf8');
+    const before = snapshotPath(configPath);
+
+    const { value: agent, stderr } = captureStderr(() =>
+      resolveAgentConfig('agy', { homedir: home, workspace: ws }));
+    assert.equal(agent.command, 'agy', 'should fall back to defaults');
+    assert.ok(stderr.includes(configPath), `warning must name the workspace file: ${stderr}`);
+    assert.equal(snapshotPath(configPath), before, 'workspace config.json must not be rewritten');
+  });
+});
+
+// 同じ catch 経路へ落ちる失敗は、種別ごとに独立して注入して確かめる（AGENTS.md テスト規約）。
+const CONFIG_BREAK_KINDS = [
+  { name: 'ルートが配列', write: p => fs.writeFileSync(p, '[]', 'utf8') },
+  { name: 'ルートが文字列', write: p => fs.writeFileSync(p, '"agy"', 'utf8') },
+  { name: '読み取りに失敗（ディレクトリ）', write: p => fs.mkdirSync(p, { recursive: true }) },
+];
+for (const kind of CONFIG_BREAK_KINDS) {
+  test(`config.json: ${kind.name} でも既定値で動き、警告に場所を示し、書き換えない`, () => {
+    withTempHome(home => {
+      const configPath = path.join(home, '.gh-maestro', 'config.json');
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      kind.write(configPath);
+      const before = snapshotPath(configPath);
+
+      const { value: agent, stderr } = captureStderr(() => resolveAgentConfig('agy', { homedir: home }));
+      assert.equal(agent.command, 'agy', 'should fall back to defaults');
+      assert.ok(stderr.includes(configPath), `warning must name the broken file: ${stderr}`);
+      assert.equal(snapshotPath(configPath), before, 'config.json must not be rewritten');
+    });
+  });
+}
+
+// skillAgentMap の型不正は、取り込まず既定値を使う。他のキー（agents）は効き続ける。
+const SKILL_MAP_BREAK_KINDS = [
+  { name: '文字列', value: 'corrupted-string' },
+  { name: '配列', value: ['array', 'is', 'invalid'] },
+];
+for (const kind of SKILL_MAP_BREAK_KINDS) {
+  test(`config.json: skillAgentMap が${kind.name}のとき取り込まず既定値を使い、警告にパスとキー名を示す。他のキーは効く`, () => {
+    withTempHome(home => {
+      const configPath = path.join(home, '.gh-maestro', 'config.json');
+      writeConfig(home, { skillAgentMap: kind.value, agents: { agy: { label: 'Agy Override' } } });
+      const before = snapshotPath(configPath);
+
+      const { value: map, stderr } = captureStderr(() => resolveSkillAgentMap({ homedir: home }));
+      assert.deepEqual(map, loadDefaults().skillAgentMap, 'broken skillAgentMap must not be merged');
+      assert.ok(stderr.includes(configPath), `warning must name the file: ${stderr}`);
+      assert.ok(stderr.includes('skillAgentMap'), `warning must name the key: ${stderr}`);
+
+      const agent = resolveAgentConfig('agy', { homedir: home });
+      assert.equal(agent.label, 'Agy Override', 'other keys must still take effect');
+      assert.equal(snapshotPath(configPath), before, 'config.json must not be rewritten');
+    });
+  });
+}
+
+test('config.json: 壊れていない設定では警告を出さない', () => {
+  withTempHome(home => {
+    writeConfig(home, { skillAgentMap: { 'gh-maestro-coder': 'agy' } });
+    const { value: map, stderr } = captureStderr(() => resolveSkillAgentMap({ homedir: home }));
+    assert.equal(map['gh-maestro-coder'], 'agy');
+    assert.equal(stderr, '', 'valid config must not warn');
+  });
+});
+
+test('config.json: 同じプロセスで同じファイルを何度読んでも、警告は箇所ごとに1回だけ出る', () => {
+  withTempHome(home => {
+    const configPath = path.join(home, '.gh-maestro', 'config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ invalid json', 'utf8');
+
+    const { stderr: fileStderr } = captureStderr(() => {
+      for (let i = 0; i < 3; i++) resolveAgentConfig('agy', { homedir: home });
+    });
+    assert.equal(fileStderr.split(configPath).length - 1, 1, `file warning must appear once: ${fileStderr}`);
+  });
+
+  withTempHome(home => {
+    writeConfig(home, { skillAgentMap: 'corrupted-string' });
+
+    const { stderr } = captureStderr(() => {
+      for (let i = 0; i < 3; i++) resolveSkillAgentMap({ homedir: home });
+    });
+    const warningLines = stderr.split('\n').filter(line => line.includes('skillAgentMap'));
+    assert.equal(warningLines.length, 1, `skillAgentMap warning must appear once: ${stderr}`);
+  });
+});
+
+test('config.json: global と workspace の同じキーが壊れていると、パスごとに警告が1回ずつ出る', () => {
+  withTempHome(home => {
+    const ws = tempDirScope.mkdtemp('gh-maestro-resolve-config-dedup-ws-');
+    const globalPath = path.join(home, '.gh-maestro', 'config.json');
+    const wsPath = path.join(ws, '.gh-maestro', 'config.json');
+    writeConfig(home, { skillAgentMap: 'global-corrupted' });
+    fs.mkdirSync(path.dirname(wsPath), { recursive: true });
+    fs.writeFileSync(wsPath, JSON.stringify({ skillAgentMap: ['ws', 'corrupted'] }), 'utf8');
+
+    const { stderr } = captureStderr(() => {
+      for (let i = 0; i < 3; i++) resolveSkillAgentMap({ homedir: home, workspace: ws });
+    });
+    const lines = stderr.split('\n').filter(line => line.includes('skillAgentMap'));
+    // キーは「パス＋キー名」で区別される。パスを外すと一方が抑止されて失敗する。
+    assert.equal(lines.filter(line => line.includes(globalPath)).length, 1,
+      `global warning must appear once: ${stderr}`);
+    assert.equal(lines.filter(line => line.includes(wsPath)).length, 1,
+      `workspace warning must appear once: ${stderr}`);
+    assert.equal(lines.length, 2, `exactly one warning per path: ${stderr}`);
+  });
+});
+
+test('resolveAgentConfig: config.json が配列の場合はデフォルトにフォールバック', () => {
+  withTempHome(home => {
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), '[]', 'utf8');
+
+    const agent = resolveAgentConfig('agy', { homedir: home });
+    assert.ok(agent, 'should fall back to defaults for array config');
+
+    assertTestConfigResolution(home);
+  });
+});
+
+// ── resolveSkillAgentMap ─────────────────────────────────────────────────────
+
+test('resolveSkillAgentMap: デフォルトのマッピングを返す', () => {
+  withTempHome(home => {
+    const map = resolveSkillAgentMap({ homedir: home });
+    assert.equal(map['gh-maestro-coder'], 'claude-ds');
+    assert.equal(map['gh-maestro-base'], 'claude-ds');
+    assert.equal(map['gh-maestro-architect'], 'codex-pro');
+    assert.equal(map['gh-maestro-senior-coder'], 'claude-ds-pro');
+    assert.equal(map['gh-maestro-diagnostician'], 'reasonix');
+    assert.equal(map['gh-maestro-explorer'], 'agy');
+    assert.equal(map['gh-maestro-reviewer'], 'codex');
+  });
+});
+
+test('resolveSkillAgentMap: global config がマッピングを上書きする', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      skillAgentMap: {
+        'gh-maestro-coder': 'custom-agent',
+      },
+    });
+
+    const map = resolveSkillAgentMap({ homedir: home });
+    assert.equal(map['gh-maestro-coder'], 'custom-agent', 'global override should win');
+    // 上書きされていないエントリはデフォルトのまま
+    assert.equal(map['gh-maestro-explorer'], 'agy');
+  });
+});
+
+test('resolveSkillAgentMap: workspace config が global config を上書きする', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-skillmap-'));
+    try {
+      writeConfig(home, {
+        skillAgentMap: { 'gh-maestro-coder': 'global-agent' },
+      });
+      writeWorkspaceConfig(ws, {
+        skillAgentMap: { 'gh-maestro-coder': 'workspace-agent' },
+      });
+
+      const map = resolveSkillAgentMap({ homedir: home, workspace: ws });
+      assert.equal(map['gh-maestro-coder'], 'workspace-agent', 'workspace should win over global');
+      assert.equal(map['gh-maestro-diagnostician'], 'reasonix', 'unrelated entry unchanged');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── reasonix 動的コマンド解決 ────────────────────────────────────────────────
+
+test('resolveAgentConfig: reasonix の command が動的に解決される', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent, 'reasonix should be resolved');
+    // npm root -g の結果に依存するため、command が 'node' または 'reasonix' のいずれか
+    assert.ok(
+      agent.command === 'node' || agent.command === 'reasonix',
+      `reasonix command should be 'node' or 'reasonix', got: ${agent.command}`,
+    );
+    // extraArgs には少なくとも 'run'（非対話1回実行モード）が含まれる
+    assert.ok(
+      agent.extraArgs.some(a => a === 'run'),
+      'extraArgs should include run',
+    );
+    // enterSequence は維持される
+  });
+});
+
+test('resolveAgentConfig: reasonix の動的 prependArgs は共通引数に一度だけ入る', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent);
+    assert.deepEqual(agent.execArgs, ['--dir', '{workspace}']);
+    assert.ok(agent.extraArgs.includes('run'));
+    const execArgs = buildAgentExecArgs(agent);
+    assert.deepEqual(execArgs.slice(-2), ['--dir', '{workspace}']);
+
+    if (agent.command === 'node') {
+      const prependArg = agent.extraArgs[0];
+      assert.ok(prependArg.endsWith('reasonix.js'));
+      assert.equal(execArgs.filter(arg => arg === prependArg).length, 1);
+    }
+  });
+});
+test('resolveAgentConfig: global extraArgs 上書き後も dynamicCommand 解決が保持される（Issue #124）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        reasonix: { extraArgs: ['--my-override-flag'] },
+      },
+    });
+
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent, 'reasonix should be resolved with override');
+
+    // command は動的解決が保持される
+    assert.ok(
+      agent.command === 'node' || agent.command === 'reasonix',
+      `reasonix command should be 'node' or 'reasonix', got: ${agent.command}`,
+    );
+
+    // 上書きした extraArgs の値が含まれている（mergeAgentConfig の配列ごと置換）
+    assert.ok(
+      agent.extraArgs.some(a => a === '--my-override-flag'),
+      'extraArgs should include the overridden --my-override-flag',
+    );
+
+    // デフォルトの --yolo は上書きにより消える（mergeAgentConfig の既存挙動）
+    assert.equal(
+      agent.extraArgs.some(a => a === '--yolo'), false,
+      'default --yolo should be gone after extraArgs override',
+    );
+
+    // 動的解決が 'node' になった場合、extraArgs の先頭にスクリプトパスが付与されている
+    if (agent.command === 'node') {
+      assert.ok(
+        agent.extraArgs[0] && agent.extraArgs[0].endsWith('reasonix.js'),
+        'first extraArg should be the dynamically resolved reasonix.js path when command is node',
+      );
+      // 動的解決の先頭要素が上書き値より前に来ている
+      assert.equal(
+        agent.extraArgs[1], '--my-override-flag',
+        'overridden flag should come after the dynamically resolved script path',
+      );
+    }
+  });
+});
+
+test('resolveAgentConfig: command 明示上書き時は dynamicCommand 解決をスキップする（PR #129 レビュー指摘）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        reasonix: {
+          command: 'my-custom-wrapper',
+          extraArgs: ['--custom-flag'],
+        },
+      },
+    });
+
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent, 'reasonix should be resolved with command override');
+
+    // command はユーザー指定のまま（dynamicCommand 解決で上書きされない）
+    assert.equal(
+      agent.command, 'my-custom-wrapper',
+      'user-overridden command should be preserved, not replaced by dynamic resolution',
+    );
+
+    // extraArgs はユーザー指定のまま（動的解決のスクリプトパスが付与されない）
+    assert.deepEqual(
+      agent.extraArgs, ['--custom-flag'],
+      'extraArgs should only contain user-specified values, no dynamic script path',
+    );
+  });
+});
+
+// ── 設定マージの境界ケース ──────────────────────────────────────────────────
+
+test('resolveAgentConfig: override が空オブジェクトの場合はデフォルトがそのまま返る', () => {
+  withTempHome(home => {
+    writeConfig(home, { agents: { 'claude-ds': {} } });
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.equal(agent.command, 'claude-ds', 'empty override should not change anything');
+  });
+});
+
+// ── validateNonInteractiveTokens（Issue #163） ─────────────────────────────────
+
+test('validateNonInteractiveTokens: 全トークンを保持していれば valid', () => {
+  const agent = { extraArgs: ['--print', '--verbose'], nonInteractiveTokens: ['--print'] };
+  assert.deepEqual(validateNonInteractiveTokens(agent), { valid: true, missing: [] });
+});
+
+test('validateNonInteractiveTokens: トークン欠落を missing で報告する', () => {
+  const agent = { extraArgs: ['--verbose'], nonInteractiveTokens: ['--print'] };
+  const result = validateNonInteractiveTokens(agent);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['--print']);
+});
+
+test('validateNonInteractiveTokens: 複数トークンの一部欠落のみ報告する', () => {
+  const agent = { extraArgs: ['run', '--dir', '/tmp'], nonInteractiveTokens: ['run', 'exec'] };
+  const result = validateNonInteractiveTokens(agent);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['exec']);
+});
+
+test('validateNonInteractiveTokens: nonInteractiveTokens 未宣言のエージェントは常に valid（agy等）', () => {
+  const agent = { extraArgs: ['--dangerously-skip-permissions'] };
+  assert.deepEqual(validateNonInteractiveTokens(agent), { valid: true, missing: [] });
+});
+
+test('validateNonInteractiveTokens: agent が null でも例外を投げず valid', () => {
+  assert.deepEqual(validateNonInteractiveTokens(null), { valid: true, missing: [] });
+});
+
+test('validateNonInteractiveTokens: extraArgs 未定義でも nonInteractiveTokens があれば欠落報告', () => {
+  const agent = { nonInteractiveTokens: ['run'] };
+  const result = validateNonInteractiveTokens(agent);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['run']);
+});
+
+test('resolveAgentConfig: claude-ds は extends 経由で nonInteractiveTokens: ["--print"] を継承する', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.deepEqual(agent.nonInteractiveTokens, ['--print']);
+  });
+});
+
+test('resolveAgentConfig: codex-pro は extends 経由で nonInteractiveTokens: ["exec"] を継承する', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('codex-pro', { homedir: home });
+    assert.deepEqual(agent.nonInteractiveTokens, ['exec']);
+  });
+});
+
+test('resolveAgentConfig: reasonix は動的解決後も run トークンを保持し valid（Issue #163）', () => {
+  withTempHome(home => {
+    const agent = resolveAgentConfig('reasonix', { homedir: home });
+    assert.ok(agent);
+    assert.deepEqual(agent.nonInteractiveTokens, ['run']);
+    // 動的解決で command=node の場合は先頭にスクリプトパスが付与されるが、run は残る
+    assert.equal(validateNonInteractiveTokens(agent).valid, true);
+  });
+});
+
+test('resolveAgentConfig: config.json で extraArgs から --print を欠落させると validateNonInteractiveTokens が検出する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      agents: {
+        'claude-ds': { extraArgs: ['--dangerously-skip-permissions'] },
+      },
+    });
+    const agent = resolveAgentConfig('claude-ds', { homedir: home });
+    assert.ok(agent);
+    // extraArgs は上書きで配列ごと置換されるが、nonInteractiveTokens は
+    // デフォルト（claude からの継承）のまま残る → 欠落を機械的に検出できる
+    assert.deepEqual(agent.nonInteractiveTokens, ['--print']);
+    assert.equal(agent.extraArgs.includes('--print'), false);
+    const result = validateNonInteractiveTokens(agent);
+    assert.equal(result.valid, false);
+    assert.deepEqual(result.missing, ['--print']);
+  });
+});
+
+test('validateNonInteractiveTokens: buildAgentExecArgs で合成したReview Manager argvを検証する', () => {
+  const agent = {
+    extraArgs: ['--model', 'gpt-6.1-sol'],
+    execArgs: ['--cd', '{workspace}'],
+    nonInteractiveTokens: ['exec'],
+  };
+  const result = validateNonInteractiveTokens(agent, buildAgentExecArgs(agent));
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['exec']);
+});
+
+test('validateNonInteractiveTokens: headless 経路固有引数にあるトークンも合成列なら検出できる', () => {
+  const agent = {
+    extraArgs: ['--model', 'gpt-6.1-sol'],
+    execArgs: ['exec', '--cd', '{workspace}'],
+    nonInteractiveTokens: ['exec'],
+  };
+  assert.equal(validateNonInteractiveTokens(agent, buildAgentExecArgs(agent)).valid, true);
+});
+
+test('validateNonInteractiveTokens: argsArray が null の場合は欠落として扱う（フェイルクローズ）', () => {
+  const agent = { extraArgs: ['--print'], nonInteractiveTokens: ['--print'] };
+  const result = validateNonInteractiveTokens(agent, null);
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.missing, ['--print']);
+});
+
+test('resolveAgentConfig: workspace config は nonInteractiveTokens を上書きできない（セキュリティ, Issue #163 Review Manager指摘）', () => {
+  withTempHome(home => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-nonint-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        agents: { codex: { nonInteractiveTokens: [] } },
+      });
+
+      const agent = resolveAgentConfig('codex', { homedir: home, workspace: ws });
+      assert.ok(agent);
+      // workspace による nonInteractiveTokens: [] の上書きは EXEC_SENSITIVE_FIELDS で
+      // 除去される → デフォルトの ['exec'] が残り、安全ガードは無効化できない
+      assert.deepEqual(agent.nonInteractiveTokens, ['exec']);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+
+// ── resolveCouncilConfig（Issue #230） ────────────────────────────────────────
+
+test('resolveCouncilConfig: council.groups と investigationAgent を解決する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: {
+        groups: {
+          default: { agents: ['claude', 'agy'], category: 'general' },
+          tech: { agents: ['codex'] },
+        },
+        investigationAgent: 'claude',
+      },
+    });
+
+    const result = resolveCouncilConfig({ homedir: home });
+    assert.ok(result);
+    assert.deepEqual(result.groups.default, { agents: ['claude', 'agy'], category: 'general' });
+    assert.deepEqual(result.groups.tech, { agents: ['codex'] });
+    assert.equal(result.investigationAgent, 'claude');
+  });
+});
+
+test('resolveCouncilConfig: investigationAgent 未指定は調査なしとして null を返す（許容）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } } },
+    });
+    const result = resolveCouncilConfig({ homedir: home });
+    assert.ok(result);
+    assert.equal(result.investigationAgent, null);
+  });
+});
+
+test('resolveCouncilConfig: default グループ必須 — 無ければフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { tech: { agents: ['claude'] } } },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: council 未定義はフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, { skillAgentMap: { 'gh-maestro-coder': 'claude' } });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 空配列 agents はフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, { council: { groups: { default: { agents: [] } } } });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 重複エージェントIDはフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude', 'claude'] } } },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 解決不能なエージェントIDはフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['no-such-agent'] } } },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: 解決不能な investigationAgent はフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } }, investigationAgent: 'no-such-agent' },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: investigationAgent が文字列でない場合もフェイルクローズ（null）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } }, investigationAgent: 42 },
+    });
+    assert.equal(resolveCouncilConfig({ homedir: home }), null);
+  });
+});
+
+test('resolveCouncilConfig: workspace 設定が global を上書きする（後勝ち）', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: {
+        groups: { default: { agents: ['claude'] } },
+        investigationAgent: 'claude',
+      },
+    });
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-council-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        council: {
+          groups: { default: { agents: ['agy'] } },
+          investigationAgent: 'agy',
+        },
+      });
+
+      const result = resolveCouncilConfig({ homedir: home, workspace: ws });
+      assert.ok(result);
+      assert.deepEqual(result.groups.default.agents, ['agy']);
+      assert.equal(result.investigationAgent, 'agy');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('resolveCouncilConfig: category 省略時は category なしで解決する', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: { groups: { default: { agents: ['claude'] } } },
+    });
+    const result = resolveCouncilConfig({ homedir: home });
+    assert.ok(result);
+    assert.deepEqual(result.groups.default, { agents: ['claude'] });
+  });
+});
+
+test('resolveCouncilConfig: workspace の groups はグループキー単位で global にマージされる', () => {
+  withTempHome(home => {
+    writeConfig(home, {
+      council: {
+        groups: {
+          default: { agents: ['claude'] },
+          globalOnly: { agents: ['codex'] },
+        },
+      },
+    });
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-ws-council-'));
+    try {
+      writeWorkspaceConfig(ws, {
+        council: {
+          groups: {
+            default: { agents: ['agy'] }, // global の default を上書き
+            wsOnly: { agents: ['codex'], category: 'general' }, // 新規キーを追加
+          },
+        },
+      });
+
+      const result = resolveCouncilConfig({ homedir: home, workspace: ws });
+      assert.ok(result);
+      // workspace が上書きしたキー（後勝ち）
+      assert.deepEqual(result.groups.default.agents, ['agy']);
+      // global のみのキーは維持される（groups 全体の置き換えではない）
+      assert.deepEqual(result.groups.globalOnly, { agents: ['codex'] });
+      // workspace が追加したキーも含まれる
+      assert.deepEqual(result.groups.wsOnly, { agents: ['codex'], category: 'general' });
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});

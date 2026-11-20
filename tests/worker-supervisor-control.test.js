@@ -1,0 +1,229 @@
+'use strict';
+
+const { installLivenessTestAdapter } = require('./helpers/process-liveness-test-double');
+installLivenessTestAdapter();
+
+const { test, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const { createTempDirScope } = require('../scripts/shared/temp-directory');
+
+const control = require('../scripts/shared/worker-supervisor-control');
+const { findRunningInstance } = require('../scripts/process-lifecycle');
+const { killProcessTree } = require('../scripts/shared/kill-tree');
+const workerLease = require('../scripts/shared/worker-lease');
+const { roleLeaseKey } = workerLease;
+
+let workspace;
+let tempDirScope;
+
+// _set... 注入はモジュール内のモジュール変数を書き換えるため、テスト間で
+// 実装を跨いで持ち越さないよう、beforeEach/afterEach で必ず実装へ戻す
+// （実プロセスは起動・killしない）。
+function resetInjectables() {
+  control._setFindRunningInstance(findRunningInstance);
+  control._setCreateResidentLeaseStore(workerLease.createResidentLeaseStore);
+  control._setIsLeaseLive(workerLease.isLeaseLive);
+  control._setKillProcessTree(killProcessTree);
+}
+
+beforeEach(() => {
+  tempDirScope = createTempDirScope();
+  workspace = tempDirScope.mkdtemp('worker-supervisor-control-');
+  resetInjectables();
+});
+
+afterEach(() => {
+  try {
+    resetInjectables();
+  } finally {
+    tempDirScope.cleanup();
+  }
+});
+
+test('runningWorkerSupervisorPids: registry エントリからPIDを検知する', () => {
+  control._setFindRunningInstance(() => ({ pid: 111, script: 'worker-supervisor.js' }));
+  control._setCreateResidentLeaseStore(() => ({ read: () => null }));
+  control._setIsLeaseLive(() => false);
+
+  assert.deepEqual(control.runningWorkerSupervisorPids(workspace), [111]);
+});
+
+test('runningLegacyWorkerSupervisorPids: 改名前のregistryエントリを検知する', () => {
+  control._setFindRunningInstance((_, opts) => (
+    opts.script === 'inbox-supervisor.js' ? { pid: 112, script: opts.script } : null
+  ));
+  control._setCreateResidentLeaseStore(() => ({ read: () => null }));
+  control._setIsLeaseLive(() => false);
+
+  assert.deepEqual(control.runningLegacyWorkerSupervisorPids(workspace), [112]);
+});
+
+test('runningWorkerSupervisorPids: role lease（排他の正本）からPIDを検知する', () => {
+  control._setFindRunningInstance(() => null);
+  control._setCreateResidentLeaseStore(() => ({ read: () => ({ pid: 222, startTime: '2026-08-01T00:00:00.000Z' }) }));
+  control._setIsLeaseLive(() => true);
+
+  assert.deepEqual(control.runningWorkerSupervisorPids(workspace), [222]);
+});
+
+test('runningWorkerSupervisorPids: registry と lease の同一PIDは重複排除する', () => {
+  control._setFindRunningInstance(() => ({ pid: 333, script: 'worker-supervisor.js' }));
+  control._setCreateResidentLeaseStore(() => ({ read: () => ({ pid: 333, startTime: '2026-08-01T00:00:00.000Z' }) }));
+  control._setIsLeaseLive(() => true);
+
+  assert.deepEqual(control.runningWorkerSupervisorPids(workspace), [333]);
+});
+
+test('runningWorkerSupervisorPids: 稼働中なしは空配列を返す', () => {
+  control._setFindRunningInstance(() => null);
+  control._setCreateResidentLeaseStore(() => ({ read: () => null }));
+  control._setIsLeaseLive(() => false);
+
+  assert.deepEqual(control.runningWorkerSupervisorPids(workspace), []);
+});
+
+test('runningWorkerSupervisorPids: 不正なPIDは未知状態として停止を中止する', () => {
+  control._setFindRunningInstance(() => ({ pid: 0, script: 'worker-supervisor.js' }));
+  control._setCreateResidentLeaseStore(() => ({ read: () => ({ pid: -5, startTime: '2026-08-01T00:00:00.000Z' }) }));
+  control._setIsLeaseLive(() => true);
+
+  assert.throws(() => control.runningWorkerSupervisorPids(workspace), /PID registryエントリが不正/);
+});
+
+test('runningWorkerSupervisorPids: 検知失敗（例外）は停止・起動判断を中止する', () => {
+  control._setFindRunningInstance(() => { throw new Error('registry boom'); });
+  control._setCreateResidentLeaseStore(() => { throw new Error('lease boom'); });
+
+  assert.throws(() => control.runningWorkerSupervisorPids(workspace), /registry boom/);
+});
+
+test('stopRunningWorkerSupervisors: 検知したPIDをkillProcessTreeで停止する', () => {
+  control._setFindRunningInstance(() => ({ pid: 444, script: 'worker-supervisor.js' }));
+  control._setCreateResidentLeaseStore(() => ({ read: () => null }));
+  control._setIsLeaseLive(() => false);
+  const killed = [];
+  control._setKillProcessTree((pid) => { killed.push(pid); });
+
+  const stopped = control.stopRunningWorkerSupervisors(workspace);
+  assert.deepEqual(stopped, [444]);
+  assert.deepEqual(killed, [444]);
+});
+
+test('stopRunningWorkerSupervisors: 個別のkill失敗は無視する（best-effort）', () => {
+  control._setFindRunningInstance(() => ({ pid: 555, script: 'worker-supervisor.js' }));
+  control._setCreateResidentLeaseStore(() => ({ read: () => null }));
+  control._setIsLeaseLive(() => false);
+  control._setKillProcessTree(() => { throw new Error('taskkill failed'); });
+
+  assert.deepEqual(control.stopRunningWorkerSupervisors(workspace), []);
+});
+
+test('cleanupLegacyWorkerSupervisor: 旧scriptのstale registryとleaseだけを整理し、現行scriptは保持する', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  const runtimeDir = path.join(workspace, 'runtime', 'pids');
+  const leaseDir = path.join(workspace, '.gh-maestro', 'leases');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.mkdirSync(leaseDir, { recursive: true });
+  const oldRegistry = path.join(legacyDir, '101.json');
+  const currentRegistry = path.join(runtimeDir, '102.json');
+  const oldLease = path.join(leaseDir, roleLeaseKey('inbox-supervisor') + '.json');
+  fs.writeFileSync(oldRegistry, JSON.stringify({
+    pid: 101, resourceKey: 'a'.repeat(64), instanceId: 'old-supervisor-registry-instance', script: 'inbox-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(currentRegistry, JSON.stringify({
+    pid: 102, startTime: '2026-01-01T00:00:00.000Z', script: 'worker-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(oldLease, JSON.stringify({
+    pid: 103, resourceKey: 'b'.repeat(64), instanceId: 'old-supervisor-lease-instance', role: 'inbox-supervisor',
+  }), 'utf8');
+
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: runtimeDir,
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'dead' }),
+    acquireLeaseLockFn: () => true,
+    releaseLeaseLockFn: () => {},
+  });
+  assert.equal(result.status, 'removed');
+  assert.equal(fs.existsSync(oldRegistry), false);
+  assert.equal(fs.existsSync(oldLease), false);
+  assert.equal(fs.existsSync(currentRegistry), true);
+});
+
+test('cleanupLegacyWorkerSupervisor: endpoint識別情報のない旧registryは生存PIDでもkillせず持ち主なしとして回収する', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const oldRegistry = path.join(legacyDir, '111.json');
+  fs.writeFileSync(oldRegistry, JSON.stringify({ pid: 111, script: 'inbox-supervisor.js' }), 'utf8');
+  let killed = false;
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({ probePid: () => 'alive', readStartTime: () => '2026-01-01T00:00:00.000Z' }),
+    killProcessTreeFn: () => { killed = true; },
+  });
+  assert.notEqual(result.status, 'unknown');
+  assert.equal(killed, false, '旧形式のPIDは再利用されうるのでkillしない');
+  assert.equal(fs.existsSync(oldRegistry), false);
+});
+
+test('cleanupLegacyWorkerSupervisor: 1件でも生死unknownなら他registryもkill・削除しない', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const liveRegistry = path.join(legacyDir, '111.json');
+  const unknownRegistry = path.join(legacyDir, '112.json');
+  fs.writeFileSync(liveRegistry, JSON.stringify({
+    pid: 111, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(unknownRegistry, JSON.stringify({
+    pid: 112, script: 'inbox-supervisor.js', instanceId: 'identity-without-resource',
+  }), 'utf8');
+  let killed = false;
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({
+      probePid: () => 'alive', readStartTime: (pid) => pid === 111 ? '2026-01-01T00:00:00.000Z' : null,
+    }),
+    killProcessTreeFn: () => { killed = true; },
+  });
+  assert.equal(result.status, 'unknown');
+  assert.equal(killed, false);
+  assert.equal(fs.existsSync(liveRegistry), true);
+  assert.equal(fs.existsSync(unknownRegistry), true);
+});
+
+test('cleanupLegacyWorkerSupervisor: leaseがunknownなら既知のregistryもkill・削除しない', () => {
+  const legacyDir = path.join(workspace, '.gh-maestro', 'pids');
+  const leaseDir = path.join(workspace, '.gh-maestro', 'leases');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.mkdirSync(leaseDir, { recursive: true });
+  const registry = path.join(legacyDir, '111.json');
+  const leasePath = path.join(leaseDir, `${roleLeaseKey('inbox-supervisor')}.json`);
+  fs.writeFileSync(registry, JSON.stringify({
+    pid: 111, startTime: '2026-01-01T00:00:00.000Z', script: 'inbox-supervisor.js',
+  }), 'utf8');
+  fs.writeFileSync(leasePath, JSON.stringify({
+    pid: 112, role: 'inbox-supervisor', resourceKey: 'c'.repeat(64), instanceId: 'unknown-lease-instance',
+  }), 'utf8');
+  let killed = false;
+  const result = control.cleanupLegacyWorkerSupervisor({
+    workspace,
+    legacyPidDir: legacyDir,
+    runtimePidDir: path.join(workspace, 'missing-runtime-pids'),
+    liveness: require('../scripts/shared/process-liveness').createLiveness({
+      probePid: (pid) => (pid === 112 ? 'unknown' : 'alive'), readStartTime: () => '2026-01-01T00:00:00.000Z',
+    }),
+    killProcessTreeFn: () => { killed = true; },
+  });
+  assert.equal(result.status, 'unknown');
+  assert.equal(killed, false);
+  assert.equal(fs.existsSync(registry), true);
+  assert.equal(fs.existsSync(leasePath), true);
+});

@@ -1,0 +1,447 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const { createFakeGh } = require('../helpers/fake-gh');
+
+const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'get-context.js');
+const REPO_ROOT = path.join(__dirname, '..', '..');
+
+// get-context の実CLI境界とGit照会は維持する。一方、読み込まれる read-state の
+// 自プロセス起動時刻取得だけは、各ケースでPowerShell/WMIを起動しない固定値へ差し替える。
+const FAST_CONTEXT_PRELOAD = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-preload-'));
+  const file = path.join(dir, 'preload.js');
+  const childProcessPath = require.resolve('../../scripts/shared/child-process');
+  const source = [
+    "'use strict';",
+    `const childProcess = require(${JSON.stringify(childProcessPath)});`,
+    "const fixedStartTime = '2026-07-25T00:00:00.000Z';",
+    'const realExecSync = childProcess.execSync;',
+    'childProcess.execSync = (command, opts) => {',
+    "  if (String(command).includes('Get-CimInstance Win32_Process')) return `${fixedStartTime}\\n`;",
+    '  return realExecSync(command, opts);',
+    '};',
+  ].join('\n');
+  fs.writeFileSync(file, source, 'utf8');
+  process.once('exit', () => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+  return file;
+})();
+
+function runContext(options = {}) {
+  return spawnSync(process.execPath, ['-r', FAST_CONTEXT_PRELOAD, SCRIPT], options);
+}
+
+test('GitHub上の遅れは件数付きで出し、install情報が無くても実CLIを成功させる', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  const git = (args) => spawnSync('git', args, { cwd: workspace, encoding: 'utf8' });
+  try {
+    const branch = git(['checkout', '-b', 'dev']);
+    assert.equal(branch.status, 0, branch.stderr);
+    const commit = git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-m', 'fixture']);
+    assert.equal(commit.status, 0, commit.stderr);
+    const localHead = git(['rev-parse', 'HEAD']);
+    assert.equal(localHead.status, 0, localHead.stderr);
+    const head = localHead.stdout.trim();
+    const fakeGh = createFakeGh({
+      binDir: path.join(home, 'bin'),
+      baseEnv: env,
+      fixtures: [{
+        match: ['api', `repos/test/repo/compare/${head}...dev`],
+        stdout: JSON.stringify({ ahead_by: 4 }),
+      }],
+    });
+    const result = runContext({ cwd: workspace, env: fakeGh.env, encoding: 'utf8' });
+
+    assert.equal(result.status, 0, `exit ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, /^BASE_BRANCH_STATUS=behind BEHIND_COMMITS=4$/m);
+    assert.match(result.stdout, /^GH_MAESTRO_INSTALL_STATUS=unknown REASON=.*インストール済みスクリプト/m);
+    assert.equal(fakeGh.readCalls().length, 1, '未知のinstall情報を正常扱いせず、不要なAPI呼び出しをしない');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+function isolatedHome() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-home-'));
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  delete env.GH_MAESTRO_WORKSPACE;
+  return { home, env };
+}
+
+function createContextWorkspace(configText) {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-get-context-workspace-'));
+  const init = spawnSync('git', ['init', '-q'], { cwd: workspace, encoding: 'utf8' });
+  assert.equal(init.status, 0, `git init failed: ${init.stderr}`);
+  const remote = spawnSync(
+    'git',
+    ['remote', 'add', 'origin', 'https://github.com/test/repo.git'],
+    { cwd: workspace, encoding: 'utf8' },
+  );
+  assert.equal(remote.status, 0, `git remote add failed: ${remote.stderr}`);
+  fs.mkdirSync(path.join(workspace, '.gh-maestro'), { recursive: true });
+  if (configText !== undefined) {
+    fs.writeFileSync(path.join(workspace, '.gh-maestro', 'config.json'), configText, 'utf8');
+  }
+  return workspace;
+}
+
+function writeDependencyFixture(workspace, installedVersion = null) {
+  fs.writeFileSync(path.join(workspace, 'package-lock.json'), JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'fixture', version: '1.0.0' },
+      'node_modules/example': { version: '1.0.0' },
+    },
+  }), 'utf8');
+  if (installedVersion !== null) {
+    fs.mkdirSync(path.join(workspace, 'node_modules', 'example'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'node_modules', 'example', 'package.json'), JSON.stringify({
+      name: 'example', version: installedVersion,
+    }), 'utf8');
+  }
+}
+
+test('REPO と WORKSPACE を正しいフォーマットで出力する', () => {
+  const { home, env } = isolatedHome();
+  const fakeGh = createFakeGh({
+    binDir: path.join(home, 'bin'),
+    baseEnv: env,
+    fixtures: [{ match: { prefix: ['api'] }, stdout: JSON.stringify({ ahead_by: 0 }) }],
+  });
+  try {
+    const r = runContext({
+      cwd: REPO_ROOT,
+      env: fakeGh.env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    // フォーマット: クォートなし、owner/repo形式
+    assert.match(r.stdout, /^REPO=[^/\s]+\/[^\s]+/m);
+    assert.match(r.stdout, /^WORKSPACE=.+/m);
+    assert.match(r.stdout, /^GH_MAESTRO_WORKER=orchestrator$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('GH_MAESTRO_WORKER=orchestrator がセッション変数として出力される（Issue #384）', () => {
+  const { home, env } = isolatedHome();
+  const fakeGh = createFakeGh({
+    binDir: path.join(home, 'bin'),
+    baseEnv: env,
+    fixtures: [{ match: { prefix: ['api'] }, stdout: JSON.stringify({ ahead_by: 0 }) }],
+  });
+  try {
+    const r = runContext({
+      cwd: REPO_ROOT,
+      env: fakeGh.env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = r.stdout.split(/\r?\n/);
+    assert.ok(
+      lines.includes('GH_MAESTRO_WORKER=orchestrator'),
+      `出力に GH_MAESTRO_WORKER=orchestrator が含まれること: ${r.stdout}`
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('test.layers宣言が無い場合はmissingをsession contextへ出力する', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^TEST_LAYERS_STATUS=missing$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('有効なtest.layers宣言がある場合はdeclaredをsession contextへ出力する', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace(JSON.stringify({
+    test: {
+      layers: {
+        every: { scope: 'full', command: [process.execPath, '--version'] },
+      },
+    },
+  }));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^TEST_LAYERS_STATUS=declared$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('壊れたtest.layersでもcontextを出力し、終了コード0で完了する', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace('{ broken');
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^\[gh-maestro session context\]$/m);
+    assert.match(r.stdout, /^TEST_LAYERS_STATUS=invalid$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('package-lock.jsonがありnode_modulesが無い場合は欠落をcontextへ出力し、開始を止めない', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  try {
+    writeDependencyFixture(workspace);
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=missing REASON=.*node_modules.*ありません$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('package-lock.jsonとnode_modulesのversionが不一致なら不一致をcontextへ出力する', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  try {
+    writeDependencyFixture(workspace, '2.0.0');
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=mismatch REASON=.*node_modules\/example.*lock=1\.0\.0.*installed=2\.0\.0$/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('依存検査が判定不能ならunknownと理由をcontextへ出力し、開始を止めない', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace();
+  try {
+    fs.writeFileSync(path.join(workspace, 'package-lock.json'), '{ broken', 'utf8');
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^NODE_MODULES_STATUS=unknown REASON=.*package-lock\.json.*JSON構文エラー/m);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('lockfileとnode_modulesが一致する場合、およびlockfileが無い場合は状態行を増やさない', () => {
+  for (const installedVersion of ['1.0.0', null]) {
+    const { home, env } = isolatedHome();
+    const workspace = createContextWorkspace();
+    try {
+      if (installedVersion !== null) writeDependencyFixture(workspace, installedVersion);
+      const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+      assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+      assert.equal(r.stdout.includes('NODE_MODULES_STATUS='), false, r.stdout);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+});
+
+test('WORKSPACE はGH_MAESTRO_WORKSPACEが無い場合にCWD上方探索で解決される（Unixスラッシュ）', () => {
+  const workspace = createContextWorkspace();
+  const subDir = path.join(workspace, 'sub', 'deep');
+  fs.mkdirSync(subDir, { recursive: true });
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
+  try {
+    const r = runContext({
+      cwd: subDir,
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const match = r.stdout.match(/^WORKSPACE=(.+)/m);
+    assert.ok(match, 'WORKSPACEが出力に含まれない');
+    // スクリプトはWindowsパスをUnixスラッシュに変換して出力する
+    const expected = workspace.replace(/\\/g, '/');
+    assert.equal(match[1].trim(), expected);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('BASE_BRANCH が出力に含まれる', () => {
+  const { mkdtempSync, rmSync } = require('fs');
+  const { execSync } = require('child_process');
+  const os = require('os');
+
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-branch-'));
+  try {
+    // 既知のブランチを持つ git リポジトリ fixture を作成し、
+    // detached HEAD 等の呼び出し元の状態に依存せず BASE_BRANCH が必ず出力される状態で検証する。
+    // git init のみでデフォルトブランチ（main）が作られ、commit は不要。
+    execSync('git init', { cwd: tmp, stdio: 'pipe' });
+    execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
+    fs.mkdirSync(path.join(tmp, '.gh-maestro'));
+
+    const r = runContext({
+      cwd: tmp,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^BASE_BRANCH=.+/m);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('orchestrator.json に sessionId がある場合は SESSION_ID が出力される', () => {
+  const { mkdtempSync, rmSync, mkdirSync, writeFileSync } = require('fs');
+  const { execSync } = require('child_process');
+  const os = require('os');
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-session-'));
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
+  try {
+    execSync('git init', { cwd: tmp, stdio: 'pipe' });
+    execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
+    const msgStateDir = path.join(tmp, '.gh-maestro', 'msg-state');
+    mkdirSync(msgStateDir, { recursive: true });
+    writeFileSync(
+      path.join(msgStateDir, 'orchestrator.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        initialized: true,
+        sessionId: 'test-uuid-abc-123',
+        readByIssue: {},
+        sinceByIssue: {},
+      }),
+      'utf8'
+    );
+
+    const r = runContext({
+      cwd: tmp,
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stdout, /^SESSION_ID=test-uuid-abc-123$/m);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('orchestrator.json に sessionId が空文字または存在しない場合は SESSION_ID が出力されない', () => {
+  const { mkdtempSync, rmSync, mkdirSync, writeFileSync } = require('fs');
+  const { execSync } = require('child_process');
+  const os = require('os');
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-nosession-'));
+  const env = { ...process.env };
+  delete env.GH_MAESTRO_WORKSPACE;
+  try {
+    execSync('git init', { cwd: tmp, stdio: 'pipe' });
+    execSync('git remote add origin https://github.com/test/repo.git', { cwd: tmp, stdio: 'pipe' });
+    const msgStateDir = path.join(tmp, '.gh-maestro', 'msg-state');
+    mkdirSync(msgStateDir, { recursive: true });
+    writeFileSync(
+      path.join(msgStateDir, 'orchestrator.json'),
+      JSON.stringify({ schemaVersion: 2, initialized: true, sessionId: '' }),
+      'utf8'
+    );
+
+    const r = runContext({
+      cwd: tmp,
+      env,
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.equal(r.stdout.includes('SESSION_ID='), false, '空文字の sessionId は出力されないこと');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// 壊れた config.json は、既定値で動いていることをセッション開始時に示す（ADR 0053）。
+// 壊れていないときは CONFIG_JSON_BROKEN を一切出さない。
+function brokenLines(stdout) {
+  return stdout.split(/\r?\n/).filter(line => line.startsWith('CONFIG_JSON_BROKEN='));
+}
+
+test('workspace の config.json が壊れていると CONFIG_JSON_BROKEN にそのパスを出す', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace('{ broken');
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = brokenLines(r.stdout);
+    assert.equal(lines.length, 1, `expected one broken-config line: ${r.stdout}`);
+    // 期待値は一時ディレクトリの名前と .gh-maestro/config.json から組み立てる（実装の出力から導出しない）。
+    assert.ok(lines[0].replace(/\\/g, '/').includes(`${path.basename(workspace)}/.gh-maestro/config.json`),
+      `line must name the workspace config: ${lines[0]}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('global の config.json が壊れていると CONFIG_JSON_BROKEN にそのパスを出す', () => {
+  const { home, env } = isolatedHome();
+  fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), '[]', 'utf8');
+  const workspace = createContextWorkspace(JSON.stringify({}));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = brokenLines(r.stdout);
+    assert.equal(lines.length, 1, `expected one broken-config line: ${r.stdout}`);
+    assert.ok(lines[0].replace(/\\/g, '/').includes(`${path.basename(home)}/.gh-maestro/config.json`),
+      `line must name the global config: ${lines[0]}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('有効な JSON でも skillAgentMap だけ不正な workspace の config.json は CONFIG_JSON_BROKEN にそのパスを出す', () => {
+  const { home, env } = isolatedHome();
+  // JSON としては正しく、skillAgentMap の型だけが不正（配列）。構文エラーとは別の分岐。
+  const workspace = createContextWorkspace(JSON.stringify({ skillAgentMap: ['not', 'an', 'object'] }));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    const lines = brokenLines(r.stdout);
+    assert.equal(lines.length, 1, `expected one broken-config line: ${r.stdout}`);
+    assert.ok(lines[0].replace(/\\/g, '/').includes(`${path.basename(workspace)}/.gh-maestro/config.json`),
+      `line must name the workspace config: ${lines[0]}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('config.json が壊れていなければ CONFIG_JSON_BROKEN を出さない', () => {
+  const { home, env } = isolatedHome();
+  const workspace = createContextWorkspace(JSON.stringify({ skillAgentMap: { 'gh-maestro-coder': 'agy' } }));
+  try {
+    const r = runContext({ cwd: workspace, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+    assert.deepEqual(brokenLines(r.stdout), []);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
