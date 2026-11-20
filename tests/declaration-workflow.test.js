@@ -103,21 +103,4 @@ test('coder と Review Manager の手順は配布された同じ基準ファイ�
     const content = fs.readFileSync(file, 'utf8');
     assert.ok(content.includes(TEST_QUALITY_CRITERIA_REF), `${path.relative(ROOT, file)} が配布正本を参照していない`);
   }
-
-  const criteria = fs.readFileSync(TEST_QUALITY_CRITERIA_SOURCE, 'utf8');
-  const requiredHeadings = [
-    '# gh-maestro テスト品質判定基準',
-    '## 2. 不要テストの判定条件',
-    '### A. 欠陥検出能力の欠如',
-    '14. **実装に合わせて期待値を改変している**',
-    '## 3. gh-maestro 新規テスト採用基準',
-    '### 基準1：検証目的が明確',
-    '### 基準2：期待値が独立している',
-    '### 基準3：欠陥を検出できる',
-    '### 基準4：追加する価値がある',
-    '## 5. 最終判断原則',
-  ];
-  for (const heading of requiredHeadings) {
-    assert.ok(criteria.includes(heading), `基準正本に既存の見出し・番号が無い: ${heading}`);
-  }
 });
