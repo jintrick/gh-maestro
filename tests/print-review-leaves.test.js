@@ -13,10 +13,12 @@ const {
   resolveReviewSkillsDir,
 } = require('../scripts/print-review-leaves');
 
-// 読み込み対象の定義ファイル（共通1件＋8葉の pre/post）を、正本の配置規約どおりリテラルで列挙する。
+// 読み込み対象の定義ファイル（共通1件＋9葉の pre/post）を、正本の配置規約どおりリテラルで列挙する。
 // 本番の導出関数から作ると、本番が1件落としても fixture も同じく落として検出できないため、導出しない。
 const REVIEW_DEFINITION_FILES = Object.freeze([
   'common.md',
+  'correctness/acceptance-criteria/pre-review.md',
+  'correctness/acceptance-criteria/post-review.md',
   'correctness/logic-invariants/pre-review.md',
   'correctness/logic-invariants/post-review.md',
   'correctness/api-contract/pre-review.md',
@@ -59,10 +61,10 @@ test('resolveReviewSkillsDir: managed root配下の共有レビュー正本を�
   );
 });
 
-test('readReviewDefinitions: 正本の17ファイルをこの順序で連結して返す', () => {
+test('readReviewDefinitions: 正本の19ファイルをこの順序で連結して返す', () => {
   withReviewFixture((root, files, expected) => {
     assert.equal(readReviewDefinitions(root), expected);
-    assert.equal(files.length, 17, '共通定義と8葉のpre/post定義をすべて読む');
+    assert.equal(files.length, 19, '共通定義と9葉のpre/post定義をすべて読む');
   });
 });
 
