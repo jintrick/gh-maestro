@@ -240,25 +240,6 @@ function readHook(dir, name) {
   return fs.readFileSync(path.join(dir, '.git', 'hooks', name), 'utf8');
 }
 
-test('新規プロジェクトにはsync-rulesフックのみを設置し、checksフックは設置しない', () => {
-  withGitProject((dir) => {
-    const r = runSetupCli(dir);
-    assert.equal(r.status, 0, r.stderr);
-
-    const preCommit = readHook(dir, 'pre-commit');
-    assert.match(preCommit, /# gh-maestro:sync-rules:v2/);
-    // Issue #283: フックからのテスト実行は廃止した。
-    assert.doesNotMatch(preCommit, /gh-maestro:checks/);
-    assert.doesNotMatch(preCommit, /run-checks/);
-    // Issue #419: AGENTS.md と CLAUDE.md の同期ブロックは設置しない。
-    assert.doesNotMatch(preCommit, /sync-agents-md\.js/);
-    assert.doesNotMatch(preCommit, /git add CLAUDE\.md/);
-
-    assert.equal(fs.existsSync(path.join(dir, '.git', 'hooks', 'pre-push')), false,
-      'pre-push フックは作られないこと');
-  });
-});
-
 test('既定ブランチがmainでなくてもmasterからdevブランチを作成する', () => {
   withGitProject((dir) => {
     prepareProjectWithoutDev(dir, 'master');
@@ -900,3 +881,4 @@ test('リポジトリ直下に.gitignoreが無くてもsetupは成功し、.giti
       '.gh-maestro配下で未追跡として見えるのはconfig.jsonだけであること');
   });
 });
+

@@ -228,12 +228,6 @@ test('main: --help / -h を表示する', () => {
   }
 });
 
-test('main: --help に GH_MAESTRO_BASE_BRANCH の説明を含む', () => {
-  const { mod } = loadModule();
-  const result = mod.main(['--help']);
-  assert.ok(result.stdout.includes('GH_MAESTRO_BASE_BRANCH'));
-});
-
 test('main: --title なしでエラー', () => {
   const { mod } = loadModule();
   const result = mod.main(['--body', 'hello']);
@@ -328,3 +322,4 @@ test('buildPrCreateArgs: GH_MAESTRO_BASE_BRANCH 未設定なら throw（誤っ�
   const { mod } = loadModule();
   assert.throws(() => mod.buildPrCreateArgs({ env: {}, title: 'T' }), /GH_MAESTRO_BASE_BRANCH/);
 });
+

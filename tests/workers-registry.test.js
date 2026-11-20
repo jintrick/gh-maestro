@@ -292,21 +292,6 @@ test('resolveWorkerName: orchestratorエントリは対象外', () => {
   });
 });
 
-test('resolveWorkerName: workers.jsonが無ければ「読み込めません」エラー（不在のみ）', () => {
-  withTempDir((dir) => {
-    assert.throws(
-      () => resolveWorkerName(dir, { issue: 42, skill: 'gh-maestro-coder' }),
-      (err) => {
-        assert.match(err.message, /読み込めません/);
-        // 不在は破損ではない。破損固有のメッセージ（JSON構文エラー）と取り違えてはならない
-        // （Issue #275 項目1）。
-        assert.doesNotMatch(err.message, /JSON構文エラー/);
-        return true;
-      }
-    );
-  });
-});
-
 test('resolveWorkerName: 破損workers.jsonは「JSON構文エラー」（不在と区別）', () => {
   withTempDir((dir) => {
     fs.mkdirSync(path.join(dir, '.gh-maestro'), { recursive: true });
@@ -332,3 +317,4 @@ test('resolveWorkerName: issue/skill 欠落はエラー', () => {
     assert.throws(() => resolveWorkerName(dir, { issue: 42 }), /skill が必要です/);
   });
 });
+

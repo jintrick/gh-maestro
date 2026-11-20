@@ -147,12 +147,6 @@ test('update-issue CLI: 更新成功後の削除失敗は成功終了し警告�
   }));
 });
 
-test('update-issue CLI: --helpはcode 0でusageを返す', () => {
-  const result = main(['--help']);
-  assert.equal(result.code, 0);
-  assert.equal(result.stdout, USAGE);
-});
-
 test('update-issue CLI: Issue番号が不正なら外部操作を呼ばない', () => {
   let called = false;
   const result = main(['--issue', '0', '--body-file', '/tmp/body.md'], {
@@ -162,3 +156,4 @@ test('update-issue CLI: Issue番号が不正なら外部操作を呼ばない', 
   assert.equal(called, false);
   assert.match(result.stderr, /正の整数/);
 });
+

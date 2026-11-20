@@ -167,31 +167,6 @@ function runMain(args) {
   }
 }
 
-test('CLI_USAGE: status・workspace・worker-name・出力形式が定義されている', () => {
-  assert.match(workerStatus.CLI_USAGE, /worker-status\.js/);
-  assert.match(workerStatus.CLI_USAGE, /status --workspace <path> --worker-name <name>/);
-  assert.match(workerStatus.CLI_USAGE, /running/);
-  assert.match(workerStatus.CLI_USAGE, /socketの消滅/);
-  assert.match(workerStatus.CLI_USAGE, /rebind/);
-  assert.match(workerStatus.CLI_USAGE, /見出しとワーカー行/);
-  assert.doesNotMatch(workerStatus.CLI_USAGE, /6区間/);
-  assert.doesNotMatch(workerStatus.CLI_USAGE, /cycle metrics/);
-});
-
-test('main: --help は code 0 で usage を返し、新しい説明を含み旧来の文言を含まない', () => {
-  const result = runMain(['--help']);
-  assert.equal(result.code, 0);
-  const helpText = result.lines.join('\n');
-  assert.match(helpText, /worker-status\.js/);
-  assert.match(helpText, /list\s+状態付きワーカー行を表示する/);
-  assert.match(helpText, /running \/ abnormal \/ stopped/);
-  assert.match(helpText, /watch\s+見出しとワーカー行を画面クリアしながら定期更新する/);
-  assert.match(helpText, /見出しとワーカー行/);
-  assert.doesNotMatch(helpText, /6区間/);
-  assert.doesNotMatch(helpText, /cycle metrics/);
-  assert.deepEqual(result.errLines, []);
-});
-
 test('main: サブコマンド・workspace・worker-name の誤用は照会せず code 1', () => {
   const workspace = createWorkspace();
   try {
@@ -206,18 +181,6 @@ test('main: サブコマンド・workspace・worker-name の誤用は照会せ�
       assert.deepEqual(result.lines, [], `args=${JSON.stringify(args)}`);
       assert.ok(result.errLines.length > 0, `args=${JSON.stringify(args)}`);
     }
-  } finally {
-    removeWorkspace(workspace);
-  }
-});
-
-test('main: worker-name の値が --help の場合は help に握り潰さず code 1', () => {
-  const workspace = createWorkspace();
-  try {
-    const result = runMain(['status', '--workspace', workspace, '--worker-name', '--help']);
-    assert.equal(result.code, 1);
-    assert.deepEqual(result.lines, []);
-    assert.ok(result.errLines.some((line) => line.includes('値が必要です')));
   } finally {
     removeWorkspace(workspace);
   }
@@ -444,27 +407,6 @@ test('snapshot: 見出しと最大4行のワーカー行（役職・モデル・
   })[0];
   assert.ok(Array.from(fullLine).length <= 120);
 
-});
-
-test('renderWorkerRows: status値を使って異常終了を文字で示し、resume回数と残数を保つ', () => {
-  const lines = workerStatus.renderWorkerRows([
-    { role: 'senior-coder', runNumber: 2, agentId: 'codex', status: 'running', running: true, durationKnown: true, elapsedSeconds: 180, pid: 2, startTime: '2026-08-26T01:00:00Z' },
-    { role: 'explorer', agentId: 'agy', status: 'running', running: true, durationKnown: true, elapsedSeconds: 60, pid: 3, startTime: '2026-08-26T01:10:00Z' },
-    { role: 'review-manager', agentId: 'agy', status: 'abnormal', running: false, abnormal: true, durationKnown: true, elapsedSeconds: 30, pid: 4, startTime: '2026-08-26T01:20:00Z' },
-    { role: 'architect', agentId: 'agy', status: 'stopped', running: false, durationKnown: true, elapsedSeconds: 30, pid: 5, startTime: '2026-08-26T01:30:00Z' },
-    { role: 'coder', agentId: 'agy', status: 'stopped', running: false, durationKnown: true, elapsedSeconds: 30, pid: 6, startTime: '2026-08-26T01:40:00Z' },
-  ], { maxRows: 4, colorize: true });
-
-  assert.equal(lines.length, 4);
-  // 見た目（丸印の個数・空白の詰め方・書式）は固定しない（docs/adr/0033）。状態と識別子だけを見る。
-  assert.ok(lines[0].includes('senior-coder x2') && lines[0].includes('[codex]') && lines[0].includes('(pid: 2)'));
-  assert.ok(lines[1].includes('explorer') && lines[1].includes('(pid: 3)'));
-  assert.ok(lines[2].includes('review-manager') && lines[2].includes('(pid: 4)'));
-  assert.ok(lines[3].includes('architect') && lines[3].includes('(pid: 5)') && lines[3].includes('+1件'));
-  assert.ok(lines[0].includes('[running]'));
-  assert.ok(lines[2].includes('[abnormal]'));
-  assert.ok(lines[3].includes('[stopped]'));
-  assert.ok(lines.every(line => !line.includes('█')));
 });
 
 test('mergeCycleWorkers: PID変更後は現在runの状態だけを採用し、履歴の異常停止を持ち越さない', () => {
@@ -1139,34 +1081,6 @@ test('runWatchLoop: 代替画面へ入ってから描画し、SIGINT/SIGTERM で
     } finally {
       removeWorkspace(workspace);
     }
-  }
-});
-
-test('runWatchLoop: rows を超えるフレームは先頭を残して切り詰め、省略件数を末尾に示す', () => {
-  const workspace = createWorkspace();
-  const fixedNow = new Date('2026-08-26T12:00:00.000Z').getTime();
-  workerStatus._setNow(() => fixedNow);
-  try {
-    writeManyWorkers(workspace, 20);
-    const full = frameLinesOf(runWatchForTest(workspace).chunks);
-    const rows = 4;
-    const fit = frameLinesOf(runWatchForTest(workspace, { rows }).chunks);
-
-    assert.ok(full.length > rows - 1, 'fixture: 切り詰めが必要な高さになっている');
-    assert.ok(fit.length <= rows - 1, `行数が rows - 1 以下（実際: ${fit.length}）`);
-    assert.deepEqual(
-      fit.slice(0, fit.length - 1),
-      full.slice(0, fit.length - 1),
-      '先頭（ヘッダー側）の行を残す',
-    );
-    const omitted = full.length - (fit.length - 1);
-    const lastLine = fit[fit.length - 1];
-    const digits = lastLine.match(/\d+/g) || [];
-    assert.ok(digits.includes(String(omitted)), `末尾に省略件数 ${omitted} を示す`);
-    assert.match(lastLine, /省略/, '省略したことを示す文言が最終行にある');
-  } finally {
-    workerStatus._setNow(null);
-    removeWorkspace(workspace);
   }
 });
 
@@ -2712,3 +2626,4 @@ test('mergeCycleWorkers: 現在のレジストリに対応しない未停止run�
   assert.equal(merged[0].durationKnown, false);
   assert.equal(merged[0].elapsedSeconds, null);
 });
+

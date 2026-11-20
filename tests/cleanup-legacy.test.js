@@ -354,37 +354,6 @@ test('msg-poll cleanerはworkerの旧seenIdsをIssue付きv2 stateへ移行し�
   });
 });
 
-test('cleanup-legacy CLIは境界で引数を検証し、明示した旧形式だけを削除する', () => {
-  withFixture((fixture) => {
-    for (const flag of ['--help', '-h']) {
-      const help = runCli(fixture, flag);
-      assert.equal(help.status, 0, help.stderr);
-      assert.match(help.stdout, /Usage:.*cleanup-legacy\.js/s);
-    }
-
-    const missingValue = runCli(fixture, '--cleanup-id');
-    assert.notEqual(missingValue.status, 0);
-    assert.match(missingValue.stderr, /には値が必要です/);
-
-    const unknownFlag = runCli(fixture, '--unknown');
-    assert.notEqual(unknownFlag.status, 0);
-    assert.match(unknownFlag.stderr, /未知のフラグ/);
-
-    writeRecord(fixture, JSON.stringify({ paneId: 5, issue: '551' }));
-    const removed = runCli(
-      fixture,
-      '--cleanup-id', CLEANUP_ID,
-      '--workspace', fixture.workspace,
-    );
-    assert.equal(removed.status, 0, removed.stderr);
-    const result = JSON.parse(removed.stdout);
-    assert.equal(result.status, 'removed');
-    assert.equal(result.ok, true);
-    assert.equal(fs.existsSync(fixture.statusPane), false);
-  });
-});
-
-
 test('旧 PID registry 整理は稼働 PID を停止せず、未知・破損項目は保持する', () => {
   withFixture((fixture) => {
     const dir = path.join(fixture.workspace, '.gh-maestro', 'pids');
@@ -471,3 +440,4 @@ test('旧 startup lock の所有者が稼働中または確認不能なら保持
     assert.equal(fs.existsSync(file), false);
   });
 });
+

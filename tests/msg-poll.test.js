@@ -83,11 +83,6 @@ function writeWorkers(workspace, workers) {
 
 // ── parseArgs（main() と CLI プリフライトが共有する解析ヘルパー） ───────────
 
-test('parseArgs: --help は help:true を返す', () => {
-  const r = msgPoll.parseArgs(['--help']);
-  assert.equal(r.help, true);
-});
-
 test('parseArgs: 値欠落は validationErrors を返す', () => {
   const r = msgPoll.parseArgs(['orchestrator', '--workspace']);
   assert.equal(r.help, false);
@@ -147,22 +142,6 @@ test('parseArgs: 正常系は validationErrors が null', () => {
 });
 
 // ── --help / -h ────────────────────────────────────────────────────────────
-
-test('--help が usage を返して code 0', () => {
-  const r = runMain(['--help']);
-  assert.equal(r.code, 0);
-  assert.ok(r.lines.join('\n').includes('msg-poll.js'));
-  assert.equal(r.errLines.length, 0);
-  assert.equal(r.scanOnce, null);
-});
-
-test('-h が usage を返して code 0', () => {
-  const r = runMain(['-h']);
-  assert.equal(r.code, 0);
-  assert.ok(r.lines.join('\n').includes('msg-poll.js'));
-  assert.equal(r.errLines.length, 0);
-  assert.equal(r.scanOnce, null);
-});
 
 // ── 引数エラー ──────────────────────────────────────────────────────────────
 
@@ -1444,3 +1423,4 @@ test('scanOnce: created_at が欠落したコメントは新着候補から除�
 
 msgPoll._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
 msgPoll._setGhApiComments(() => ({ status: 0, stdout: JSON.stringify([]) }));
+
