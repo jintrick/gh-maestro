@@ -69,7 +69,12 @@ description: gh-maestroセッションをこのワークスペースで起動す
    ```sh
    gh issue list --repo $REPO --state open --limit 20
    gh pr list --repo $REPO --state merged --limit 15
+   gh search issues --repo $REPO --state open "SESSION-HANDOFF" --match comments
    ```
+
+   最後の検索で見つかったIssueは、前のセッションが作業を中断したまま終えたものである。そのIssueの `SESSION-HANDOFF` を含む最新のコメントを読み、中断している作業・現在の状態・次にやることを人間へ伝え、そこから再開する。
+
+   人間がセッションを終えると言ったときは、作業中のIssueに引き継ぎコメントを `comment-issue.js` で残す。1行目に `SESSION-HANDOFF` を書き、現在の状態（PR・HEAD・ワーカー・未対応の失敗）、判明したこと、次にやること、守る制約を書く。
 
 6. **テスト層宣言**: セッションコンテキストの `TEST_LAYERS_STATUS` が `missing` または `invalid` なら、`gh-maestro-test-setup` スキルを読んで従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更しない。承認後の設定・テスト配置・実行結果の確認まで終えてから次へ進む。`invalid` を理由に初期化やコンテキスト出力をやり直さず、出力された状態を使う。
 
