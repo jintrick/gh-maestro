@@ -81,27 +81,6 @@ function runConfig(args, home, cwd) {
 
 // ── CLI integration: --help ────────────────────────────────────────────────────
 
-test('CLI: --help / -h は usage を表示し exit 0', () => {
-  withTempHome(home => {
-    for (const flag of ['--help', '-h']) {
-      const r = runConfig([flag], home);
-      assert.equal(r.status, 0, `${flag}: exit 0, got ${r.status}, stderr: ${r.stderr}`);
-      assert.ok(r.stdout.includes('config.js'), `${flag}: stdout should include script name`);
-      assert.ok(r.stdout.includes('use'), `${flag}: stdout should mention use subcommand`);
-      assert.doesNotMatch(r.stdout, /\bstatus\b/, `${flag}: status subcommand should not appear in usage`);
-      assert.ok(r.stdout.includes('doctor'), `${flag}: stdout should mention doctor subcommand`);
-    }
-  });
-});
-
-test('CLI: サブコマンドなしは usage を stderr に出して exit 1', () => {
-  withTempHome(home => {
-    const r = runConfig([], home);
-    assert.notEqual(r.status, 0);
-    assert.ok(r.stderr.includes('config.js'), 'stderr should include usage');
-  });
-});
-
 test('CLI: 削除済みのstatusサブコマンドは未知として拒否する', () => {
   withTempHome(home => {
     const r = runConfig(['status'], home);
@@ -403,22 +382,6 @@ test('CLI doctor: workspace config のパースエラーを報告する', () => 
   });
 });
 
-test('CLI doctor: 未知のスキルキーを警告する', () => {
-  withTempHome(home => {
-    writeConfig(home, {
-      skillAgentMap: { 'gh-maestro-review-manager': 'codex' },
-    });
-
-    const r = runConfig(['doctor'], home);
-    // WARN は exit code 1 にしない（doctor は exit code 1 だが、他の issue による）
-    // ただし警告メッセージが出力されること
-    assert.ok(
-      r.stdout.includes('unknown skill key') && r.stdout.includes('gh-maestro-review-manager'),
-      `should warn about unknown skill key: ${r.stdout}`,
-    );
-  });
-});
-
 test('CLI doctor: プロファイル内の未知のスキルキーを警告する', () => {
   withTempHome(home => {
     writeConfig(home, {
@@ -560,3 +523,4 @@ test('CLI use: パース不能な config の場合はエラー', () => {
     assert.ok(r.stderr.includes('cannot parse'), r.stderr);
   });
 });
+

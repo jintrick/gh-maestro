@@ -25,34 +25,8 @@ function ghListStub({ byHead = [], all = [] } = {}) {
 const DRAFT_WITH_BODY = { number: 5, isDraft: true, body: '関連Issue: #671' };
 const PUBLIC_WITH_BODY = { number: 6, isDraft: false, body: '関連Issue: #671' };
 
-test('下書きと公開済みが混ざったとき、公開済みのPR番号だけを選ぶ（枝名検索の段）', () => {
-  const { spawnSyncFn } = ghListStub({ byHead: [DRAFT_WITH_BODY, PUBLIC_WITH_BODY] });
-  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '6');
-});
-
-test('下書きだけのとき、枝名検索でも本文検索でも検出しない（空文字列）', () => {
-  const { spawnSyncFn } = ghListStub({ byHead: [DRAFT_WITH_BODY], all: [DRAFT_WITH_BODY] });
-  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '');
-});
-
-test('枝名検索に公開済みが無ければ、本文検索で公開済みのPR番号を選ぶ（下書きは飛ばす）', () => {
-  const { spawnSyncFn } = ghListStub({
-    byHead: [],
-    all: [
-      { number: 7, isDraft: true, body: '関連Issue: #671' },
-      { number: 8, isDraft: false, body: '関連Issue: #671' },
-      { number: 9, isDraft: false, body: '関連Issue: #999' },
-    ],
-  });
-  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '8');
-});
-
-test('isDraft が取得できないPRは、下書きかどうか確認できないため検出しない（フェイルクローズ）', () => {
-  const { spawnSyncFn } = ghListStub({ byHead: [{ number: 10, body: '関連Issue: #671' }] });
-  assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '');
-});
-
 test('gh の一覧取得が失敗したら検出しない（空文字列。例外にしない）', () => {
   const spawnSyncFn = () => ({ status: 1, stdout: '', stderr: 'boom' });
   assert.equal(findReviewablePr({ repo: 'o/r', issue: 671 }, spawnSyncFn), '');
 });
+

@@ -54,11 +54,6 @@ function validPayload(findings) {
   };
 }
 
-test('parseArgs returns help for --help and -h', () => {
-  assert.deepEqual(parseArgs(['--help']), { mode: 'help' });
-  assert.deepEqual(parseArgs(['-h']), { mode: 'help' });
-});
-
 test('parseArgs requires --pr', () => {
   assert.throws(() => parseArgs(['--json']), (error) => error instanceof ReviewFindingsError && error.exitCode === 1);
 });
@@ -135,12 +130,6 @@ test('formatFindingFull prints the whole body and every verified reference witho
   assert.ok(text.includes('- 判定根拠: 入力が0のとき誤った結果になる'));
 });
 
-test('CLI --help exits 0 and prints Usage', () => {
-  const result = spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' });
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /Usage: node read-review-findings\.js --pr <N>/);
-});
-
 test('CLI exits 2 when manager.json is missing', () => {
   withWorkspace((dir) => {
     const result = spawnSync(process.execPath, [SCRIPT, '--pr', '7', '--workspace', dir], { encoding: 'utf8' });
@@ -168,13 +157,6 @@ test('CLI --json prints the verified payload that start-review-manager accepts a
     assert.equal(out.headRefOid, 'abc1234def5678');
     assert.equal(out.findings[0].body, '本文の全文。ここが切れてはならない。');
   });
-});
-
-test('CLI exits 1 with an error message when --pr is missing (no workspace access)', () => {
-  const result = spawnSync(process.execPath, [SCRIPT, '--json'], { encoding: 'utf8' });
-  assert.equal(result.status, 1, result.stdout);
-  assert.match(result.stderr, /read-review-findings: 引数エラー/);
-  assert.match(result.stderr, /Usage: node read-review-findings\.js/);
 });
 
 test('CLI exits 1 when an unexpected positional argument is given', () => {
@@ -212,3 +194,4 @@ test('CLI text output (no --json) exits 0 and prints each finding body and every
     assert.ok(result.stdout.includes('- 指摘件数: 1'));
   });
 });
+

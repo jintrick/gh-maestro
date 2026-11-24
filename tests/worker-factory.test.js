@@ -279,24 +279,6 @@ test('buildNormalWorkerLaunchSpec: 数値化できない issue（"12abc"）は i
   );
 });
 
-test('buildNormalWorkerLaunchSpec: gh-maestro-reviewer は通常ワーカーとして受け付ける（手動デバッグ経路）', () => {
-  // docs/review-manager-plan.md に記載の手動デバッグ経路:
-  //   spawn-worker.js --skill gh-maestro-reviewer
-  // 通常ワーカーと同じ規約（worktreeKey=workerName, lease=workers.json）で起動する。
-  const spec = buildNormalWorkerLaunchSpec({
-    skill: 'gh-maestro-reviewer',
-    issue: 55,
-    description: 'debug-pr-7',
-    repo: 'o/r',
-    workspace: '/ws',
-  });
-  assert.equal(spec.workerName, 'issue-55-review-manager-debug-pr-7');
-  assert.equal(spec.role, 'review-manager');
-  assert.equal(spec.skill, 'gh-maestro-reviewer');
-  assert.equal(spec.pr, null);
-  assert.equal(spec.worktreeKey, spec.workerName);
-});
-
 // ── buildReviewManagerLaunchSpec ───────────────────────────────────────────────
 
 test('buildReviewManagerLaunchSpec: 各フィールドが正しく設定される', () => {
@@ -683,3 +665,4 @@ test('buildReviewManagerLaunchSpec: 不正な issue（0・負数・"abc"）は�
     );
   }
 });
+

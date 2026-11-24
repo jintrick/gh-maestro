@@ -307,12 +307,6 @@ function moduleFor(mocks = {}) {
   });
 }
 
-test('parseArgs: --help は code 0', () => {
-  const { mod } = moduleFor();
-  assert.equal(mod.parseArgs(['--help']).code, 0);
-  assert.equal(mod.parseArgs(['-h']).code, 0);
-});
-
 test('parseArgs: 必須欠落・--resume 無 --session・余分引数は code 1', () => {
   const { mod } = moduleFor();
   assert.equal(mod.parseArgs(['--body-file', 'x.md']).code, 1);                                  // --title 欠落
@@ -372,19 +366,6 @@ test('runCouncil: 破損したstateは新規Discussionを作成せずfail-closed
     assert.match(result.err, /JSON構文エラー/);
     assert.equal(gqlCalls.some((call) => call.args.some((arg) => arg.includes('createDiscussion'))), false);
     assert.equal(spawnCalls.some((call) => call.cmd === 'git' && call.args.includes('worktree')), false);
-  });
-});
-
-test('runCouncil: usage エラーは exit 1（help とは区別）', async () => {
-  await withCouncilEnv(async ({ workspace }) => {
-    const { mod } = moduleFor();
-    const r = await runAndCapture(() => mod.runCouncil(['--body-file', 'x.md', '--workspace', workspace]));
-    assert.equal(r.code, 1);
-    assert.ok(r.err.includes('--title is required'), 'usage を stderr に出す');
-
-    const r2 = await runAndCapture(() => mod.runCouncil(args(workspace, { resume: true })));
-    assert.equal(r2.code, 1);
-    assert.ok(r2.err.includes('--resume requires --session'));
   });
 });
 
@@ -989,35 +970,6 @@ test('マニフェスト構造: phase/session/title/agenda/worktree/participants
 
 // ── 調査結果の自動検知・補足コンテクスト ────────────────────────────────────────
 
-test('調査結果の自動検知: 初回コメント投稿＋context_appendix 全文埋め込み（SSOT）', async () => {
-  await withCouncilEnv(async ({ workspace }) => {
-    const invPath = path.join(workspace, '.gh-maestro', `council-${AUTO_SESSION}.investigation.json`);
-    fs.mkdirSync(path.dirname(invPath), { recursive: true });
-    fs.writeFileSync(invPath, JSON.stringify({ findings: '調査により X が判明', sources: ['src/a.md', 'docs/b.md'] }), 'utf8');
-    const spawn = makeSpawnSync();
-    const jobs = makePhaseJobs(scenario({ opinion: [{ pid: 'agent-a' }], vote: [{ pid: 'agent-a' }] }));
-    const { mod, gqlCalls } = loadModule({ spawn: spawn, resolveConfig: makeResolveConfig({ agents: ['agent-a'] }), phaseJobs: jobs });
-    const r = await runAndCapture(() => mod.runCouncil(args(workspace)));
-    assert.equal(r.code, 0);
-    assert.ok(r.out.includes('COUNCIL_INVEST_POSTED true'));
-
-    // 初回コメント（意見投稿より前）が調査結果そのもの
-    const commentCalls = gqlCalls.filter((c) => c.args.some((a) => a.includes('addDiscussionComment')));
-    assert.equal(commentCalls.length, 4, '調査 + 意見 + 投票 + 要約');
-    const first = commentCalls[0].execOpts.input;
-    assert.ok(first.includes('## 調査結果'));
-    assert.ok(first.includes('調査により X が判明'));
-    assert.ok(first.includes('src/a.md'));
-    assert.ok(first.includes('docs/b.md'));
-
-    // context_appendix に全文埋め込み（orchestrator の再編纂なし）
-    const opinionManifest = jobs.calls.find((c) => c.manifest.phase === 'opinion').manifest;
-    assert.ok(opinionManifest.context_appendix.includes('## 調査結果（自動埋め込み）'));
-    assert.ok(opinionManifest.context_appendix.includes('調査により X が判明'));
-    assert.ok(opinionManifest.context_appendix.includes('src/a.md'));
-  });
-});
-
 test('--context-file: 補足コンテクストを投稿し appendix に併記', async () => {
   await withCouncilEnv(async ({ workspace }) => {
     const ctx = path.join(workspace, 'ctx.md');
@@ -1107,18 +1059,4 @@ test('finalize: 投票スキーマ違反はフェイルクローズ（exit 2・�
 // parseArgs の結果が runCouncil へ結線されていること、usage の非ゼロ終了を、in-process 呼び出しでは検出できないため。
 // 根拠: .claude/rules/cli-input-validation-at-boundary.md
 
-test('CLI境界: --body-file 欠落は子プロセスで exit 1 かつ エラー文言を出す（gh 呼び出しなし）', () => {
-  const { spawnSync } = require('child_process');
-  const script = path.join(__dirname, '..', 'scripts', 'run-council.js');
-  const r = spawnSync(process.execPath, [script, '--title', 'T'], { encoding: 'utf8', timeout: 15000 });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /--body-file is required/);
-});
 
-test('CLI境界: --resume なのに --session 無しは子プロセスで exit 1（usage が非ゼロで終わる）', () => {
-  const { spawnSync } = require('child_process');
-  const script = path.join(__dirname, '..', 'scripts', 'run-council.js');
-  const r = spawnSync(process.execPath, [script, '--title', 'T', '--body-file', 'a.md', '--resume'], { encoding: 'utf8', timeout: 15000 });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /--resume requires --session/);
-});

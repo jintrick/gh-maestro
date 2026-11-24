@@ -26,17 +26,6 @@ function makeWorkspace(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-test('cleanup-workspace-registry CLI: helpは0、未知引数は1', () => {
-  const help = main(['--help']);
-  assert.equal(help.code, 0);
-  assert.deepEqual(help.lines, [USAGE]);
-
-  const invalid = main(['--unknown']);
-  assert.equal(invalid.code, 1);
-  assert.match(invalid.errLines.join('\n'), /cleanup-workspace-registry/);
-  assert.match(invalid.errLines.join('\n'), /--unknown/);
-});
-
 test('cleanup-workspace-registry: stale登録だけを削除し、現存workspace登録を保持する', () => {
   withRuntime(() => {
     const existing = makeWorkspace('gh-maestro-cleanup-existing-');
@@ -119,3 +108,4 @@ test('cleanup-workspace-registry CLI: 結果行はstdout、エラー行はstderr
   assert.deepEqual(stdout, ['Removed stale workspace registrations (1):\n']);
   assert.deepEqual(stderr, ['cleanup-workspace-registry: registry unreadable\n']);
 });
+

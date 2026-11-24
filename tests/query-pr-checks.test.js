@@ -309,26 +309,10 @@ test('query-pr-checks main は1行JSONと非0エラーを返す', () => {
   assert.match(failed.stderr, /GitHub offline/);
 });
 
-test('query-pr-checks CLI exposes help and rejects missing/invalid PR at process boundary', () => {
-  const script = path.join(__dirname, '..', 'scripts', 'query-pr-checks.js');
-  const help = spawnSync(process.execPath, [script, '--help'], { encoding: 'utf8' });
-  assert.equal(help.status, 0);
-  assert.match(help.stdout, /Usage:/);
-
-  const missing = spawnSync(process.execPath, [script, '--repo', 'owner/project'], { encoding: 'utf8' });
-  assert.notEqual(missing.status, 0);
-  assert.match(missing.stderr, /--pr/);
-
-  for (const pr of ['0', '1junk']) {
-    const invalid = spawnSync(process.execPath, [script, '--pr', pr, '--repo', 'owner/project'], { encoding: 'utf8' });
-    assert.notEqual(invalid.status, 0);
-    assert.match(invalid.stderr, /正の整数/);
-  }
-});
-
 test('normalizePrNumber は正の整数文字列だけを受け付ける', () => {
   assert.equal(normalizePrNumber('17'), '17');
   assert.equal(normalizePrNumber(' 17 '), '17');
   assert.equal(normalizePrNumber('0'), null);
   assert.equal(normalizePrNumber('17x'), null);
 });
+

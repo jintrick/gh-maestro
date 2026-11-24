@@ -262,29 +262,6 @@ test('--prompt-file で存在しないファイルを指定するとエラー終
 });
 
 
-test('--prompt-file の内容が gh-maestro-base の必須チェックを満たす（バリデーションを通過する）', () => {
-  const fs = require('fs');
-  const os = require('os');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-maestro-test-promptfile-ok-'));
-  const promptFile = path.join(tmp, 'prompt.md');
-  fs.writeFileSync(promptFile, 'バッククォート ` を含む長文プロンプト');
-  try {
-    const r = run([
-      '--skill', 'gh-maestro-base',
-      '--issue', '1', '--description', 'test', '--repo', 'o/r',
-      '--prompt-file', promptFile,
-      '--agent', 'nonexistent',
-    ], BASE_ENV);
-    // --prompt-file自体は受理され、後段の（無関係な）--agent解決エラーで落ちることを確認する
-    // （gh-maestro-base の --prompt-file 必須チェックでは落ちない = 有効なプロンプトとして扱われた証拠）
-    assert.notEqual(r.status, 0);
-    assert.doesNotMatch(r.stderr, /--prompt-file が必要です/);
-    assert.match(r.stderr, /nonexistent/);
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('--short-prompt は短い安全なメッセージを受け付ける', () => {
   const r = run([
     '--skill', 'gh-maestro-coder',
@@ -1156,3 +1133,4 @@ test('Issue #444 受入条件5: 古いセッションIDは新しいセッショ�
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
+

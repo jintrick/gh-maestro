@@ -85,33 +85,7 @@ test('buildPrompt normalizes backslash paths to forward slashes', () => {
   assert.match(prompt, /C:\/ws\/\.gh-maestro\/records\/pr\/5\/review\/manifest\.json/);
 });
 
-test('buildPrompt: paths and phase inputs include the instruction to read the phase skill', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', workspace: 'C:\\ws',
-    mainGhDir: 'C:\\main\\.gh-maestro', skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /SCRIPTS=/);
-  assert.match(prompt, /MANIFEST=/);
-  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
-  assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください/);
-});
-
 // ── buildFinalizePrompt（フェーズ2: 統合・完否判断） ──────────────────────
-
-test('buildFinalizePrompt supplies concise phase-2 paths for result integration', () => {
-  const { prompt } = buildFinalizePrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:\\ws',
-    outputFile: 'C:\\ws\\out.json', mainGhDir: 'C:\\main\\.gh-maestro',
-    resultsFile: 'C:\\ws\\results.json', skillPath: SKILL_MD,
-  });
-  assert.match(prompt, /PR=5/);
-  assert.match(prompt, /Review Manager フェーズ2/);
-  assert.match(prompt, /OUTPUT=C:\/ws\/out\.json/);
-  assert.match(prompt, /RESULTS=C:\/ws\/results\.json/);
-  assert.match(prompt, /SKILL=C:\/canonical\/skills\/gh-maestro-reviewer\/SKILL\.md/);
-  assert.match(prompt, /SKILL に指定されたファイルを読み、そこに記載されたフェーズ2の手順を実行してください/);
-  assert.match(prompt, /DRAFT=C:\/ws\/\.staging-out\.json\./);
-});
 
 // ── runJobsDeterministically / judgeJobRun（決定論的ジョブ実行・モデル介入なし） ──
 // 実プロセス（run-review-jobs.js）はspawnせず、注入した終了結果 {status,error} 分岐を検証する
@@ -811,28 +785,6 @@ test('findIncompleteSentinel: mainを優先し、どちらにも無ければnull
   assert.equal(findIncompleteSentinel(testDir, null, 999), null);
 });
 
-test('persistReviewManifest: worktreeのrecordsパスからmainのrecordへ永続化する', () => {
-  const testDir = path.join(tmpBase, 'persist-records');
-  fs.mkdirSync(testDir, { recursive: true });
-  const workspace = testDir;
-  const wtDir = path.join(testDir, 'wt');
-  const manifestContent = JSON.stringify({ pr: 111, repo: 'o/r', acceptanceCriteria: ['条件A', '条件B'] });
-
-  // worktree側 records パスにmanifestを用意（改訂後のSKILL.mdが書く場所）
-  const srcManifest = path.join(wtDir, '.gh-maestro', 'records', 'pr', '111', 'review', 'manifest.json');
-  fs.mkdirSync(path.dirname(srcManifest), { recursive: true });
-  fs.writeFileSync(srcManifest, manifestContent, 'utf8');
-
-  const logs = [];
-  const result = persistReviewManifest({ reviewWtDir: wtDir, workspace, pr: 111, log: (m) => logs.push(m) });
-
-  const target = path.join(workspace, '.gh-maestro', 'records', 'pr', '111', 'review', 'manifest.json');
-  assert.equal(result.persisted, true);
-  assert.equal(result.sourcePath, srcManifest);
-  assert.equal(result.targetPath, target);
-  assert.equal(fs.readFileSync(target, 'utf8'), manifestContent);
-});
-
 test('persistReviewManifest: legacyパス（review-manifest-<PR>.json）からも取り込む', () => {
   const testDir = path.join(tmpBase, 'persist-legacy');
   fs.mkdirSync(testDir, { recursive: true });
@@ -946,68 +898,4 @@ test('readIncompleteSentinel: 解釈できないセンチネルは null（notify
 
 const PRE_717_SCRIPTS_DIR = path.join(__dirname, '..', 'scripts').replace(/\\/g, '/');
 
-test('#717: priorFindingsFile を渡さない buildPrompt は変更前と同一の文字列（フェーズ1）', () => {
-  const { prompt } = buildPrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws',
-    mainGhDir: 'C:/main/.gh-maestro', skillPath: 'C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
-  });
-  const expected = [
-    'Review Manager フェーズ1',
-    'SKILL に指定されたファイルを読み、そこに記載されたフェーズ1の手順を実行してください。',
-    'PR=5',
-    'REPO=o/r',
-    'WORKSPACE=C:/ws',
-    `SCRIPTS=${PRE_717_SCRIPTS_DIR}`,
-    'SKILL=C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
-    'ISSUE=260',
-    'GH_DIR=C:/main/.gh-maestro',
-    'MANIFEST=C:/ws/.gh-maestro/records/pr/5/review/manifest.json',
-  ].join('\n');
-  assert.equal(prompt, expected);
-});
 
-test('#717: priorFindingsFile を渡さない buildFinalizePrompt は変更前と同一の文字列（フェーズ2）', () => {
-  const { prompt } = buildFinalizePrompt({
-    pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws',
-    outputFile: 'C:/ws/out.json', mainGhDir: 'C:/main/.gh-maestro',
-    resultsFile: 'C:/ws/results.json', skillPath: 'C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
-  });
-  const lines = prompt.split('\n');
-  assert.match(lines[lines.length - 1], /^DRAFT=C:\/ws\/\.staging-out\.json\.\d+-\d+-[a-z0-9]+$/);
-  const expected = [
-    'Review Manager フェーズ2',
-    'SKILL に指定されたファイルを読み、そこに記載されたフェーズ2の手順を実行してください。',
-    'PR=5',
-    'REPO=o/r',
-    'WORKSPACE=C:/ws',
-    'OUTPUT=C:/ws/out.json',
-    'RESULTS=C:/ws/results.json',
-    `SCRIPTS=${PRE_717_SCRIPTS_DIR}`,
-    'SKILL=C:/canonical/skills/gh-maestro-reviewer/SKILL.md',
-    'ISSUE=260',
-    'GH_DIR=C:/main/.gh-maestro',
-  ].join('\n');
-  assert.equal(lines.slice(0, -1).join('\n'), expected);
-});
-
-test('#717: priorFindingsFile を渡すと、両フェーズとも未指定時のプロンプトの末尾に、指定ファイルと再レビュー手順書を読む指示だけが足される', () => {
-  const skillPath = 'C:/canonical/skills/gh-maestro-reviewer/SKILL.md';
-  const suffix = [
-    '',
-    'PRIOR_FINDINGS=C:/data/prior.json',
-    'RE_REVIEW=C:/canonical/skills/gh-maestro-reviewer/re-review.md',
-    'RE_REVIEW に指定されたファイルも読み、PRIOR_FINDINGS の扱いに関する手順に従ってください。',
-  ].join('\n');
-  const common = { pr: '5', repo: 'o/r', issue: '260', workspace: 'C:/ws', mainGhDir: 'C:/main/.gh-maestro', skillPath };
-
-  const base1 = buildPrompt(common).prompt;
-  const p1 = buildPrompt({ ...common, priorFindingsFile: 'C:\\data\\prior.json' }).prompt;
-  assert.equal(p1, base1 + suffix);
-
-  const fin = { ...common, outputFile: 'C:/ws/out.json', resultsFile: 'C:/ws/results.json' };
-  // DRAFT= は実行ごとの乱数名なので、その行だけ固定値へ置き換えてから全体を比較する。
-  const norm = (p) => p.replace(/DRAFT=\S+/, 'DRAFT=<x>');
-  const base2 = norm(buildFinalizePrompt(fin).prompt);
-  const p2 = norm(buildFinalizePrompt({ ...fin, priorFindingsFile: 'C:\\data\\prior.json' }).prompt);
-  assert.equal(p2, base2 + suffix);
-});

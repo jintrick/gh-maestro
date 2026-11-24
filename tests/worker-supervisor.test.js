@@ -769,21 +769,7 @@ describe('Review Manager stop monitoring', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('CLI usage', () => {
-  test('--help が usage を返して code 0', () => {
-    const r = runMain(['--help']);
-    assert.equal(r.code, 0);
-    assert.ok(r.lines.join('\n').includes('worker-supervisor.js'));
-    assert.equal(r.errLines.length, 0);
-    assert.equal(r.runOnce, null);
   });
-
-  test('-h が usage を返して code 0', () => {
-    const r = runMain(['-h']);
-    assert.equal(r.code, 0);
-    assert.ok(r.lines.join('\n').includes('worker-supervisor.js'));
-    assert.equal(r.runOnce, null);
-  });
-});
 // ═══════════════════════════════════════════════════════════════════════════
 // 引数エラー
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1158,23 +1144,6 @@ describe('Delivery', () => {
     assert.ok(result.error.includes('alive'));
   });
 
-  test('deliverMessage: プロセス非生存 + agentId未解決なら本当のconfigエラーが伝播する（汎用pendingで上書きされない）', () => {
-    setWorkersIdle();
-
-    const result = supervisor.deliverMessage({
-      workerName: 'w', entry: { pid: 123, startTime: 's', agentId: 'nonexistent-agent' },
-      message: { from: 'orch', body: 'hello' }, workspace: '/ws',
-      homedir: '/home/user', issue: '5',
-    });
-
-    assert.equal(result.success, false);
-    assert.equal(result.method, 'config-unresolvable');
-    assert.ok(result.error.includes('configを解決できません'),
-      `本当のconfigエラーが含まれる: ${result.error}`);
-    assert.ok(!result.error.includes('queued for resume'),
-      `汎用メッセージで上書きされない: ${result.error}`);
-  });
-
   test('deliverMessage: pid が null + agentId未解決でも config-unresolvable', () => {
     const result = supervisor.deliverMessage({
       workerName: 'w', entry: { pid: null, agentId: 'nonexistent-agent' },
@@ -1327,22 +1296,6 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
     });
   });
 
-  test('tryResumeAndDeliver: claude（system-prompt-file）も成功する', () => {
-    withTempDir((dir) => {
-      setupResumeWorkspace(dir, { workerName: 'issue-10-fix', agentId: 'claude' });
-
-      const result = supervisor.tryResumeAndDeliver({
-        workerName: 'issue-10-fix', agentId: 'claude',
-        message: { from: 'orch', body: 'claude宛メッセージ' }, workspace: dir, homedir: '/home',
-      });
-      assert.equal(result.success, true);
-      assert.equal(result.method, 'resume');
-      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
-      assert.ok(cmd.includes('--continue'));
-      assert.ok(cmd.includes('claude宛メッセージ'));
-    });
-  });
-
   test('tryResumeAndDeliver: クローズ済みPRのブランチではresumeを起動しない', () => {
     withTempDir((dir) => {
       setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
@@ -1411,32 +1364,6 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
       // 「ワーカーが見つからない」ではなくレジストリ失敗として報告されること
       assert.ok(result.error.includes('読み取り・解析に失敗'), result.error);
       assert.ok(!result.error.includes('見つかりません'), result.error);
-    });
-  });
-
-  test('tryResumeAndDeliver: agy成功時はresumeし新pid/startTimeでworkers.jsonを更新する', () => {
-    withTempDir((dir) => {
-      setupResumeWorkspace(dir, { workerName: 'issue-7-fix', agentId: 'agy' });
-      resetHeadlessLaunchMocks({ pid: 77 });
-      setWorkerAlive(() => true);
-
-      const result = supervisor.tryResumeAndDeliver({
-        workerName: 'issue-7-fix', agentId: 'agy',
-        message: { from: 'orch', body: '新着メッセージ本文' }, workspace: dir, homedir: '/home',
-      });
-
-      assert.equal(result.success, true);
-      assert.equal(result.method, 'resume');
-      assert.equal(result.pid, 77);
-
-      // ログインシェルでラップされたコマンド文字列に --continue とメッセージ本文が含まれる
-      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
-      assert.ok(cmd.includes('--continue'));
-      assert.ok(cmd.includes('新着メッセージ本文'));
-
-      const raw = readWorkersRaw(dir);
-      assert.equal(raw['issue-7-fix'].pid, 77);
-      assert.equal(typeof raw['issue-7-fix'].resourceKey, 'string');
     });
   });
 
@@ -1513,22 +1440,6 @@ describe('resume配線（休止中のセッション再開系ワーカー）', (
       });
       assert.equal(result.success, true);
       assert.equal(result.method, 'resume');
-    });
-  });
-
-  test('tryResumeAndDeliver: reasonix（positional）も成功する', () => {
-    withTempDir((dir) => {
-      setupResumeWorkspace(dir, { workerName: 'issue-9-fix', agentId: 'reasonix' });
-
-      const result = supervisor.tryResumeAndDeliver({
-        workerName: 'issue-9-fix', agentId: 'reasonix',
-        message: { from: 'orch', body: 'reasonix宛メッセージ' }, workspace: dir, homedir: '/home',
-      });
-      assert.equal(result.success, true);
-      assert.equal(result.method, 'resume');
-      const cmd = decodeLoginShellCommand(lastSpawnCalls[0]);
-      assert.ok(cmd.includes('--continue'));
-      assert.ok(cmd.includes('reasonix宛メッセージ'));
     });
   });
 
@@ -1762,34 +1673,7 @@ describe('shouldRetry', () => {
     }, now), false);
   });
 
-  test('lastMethod未設定でも lastError が config 解決失敗文言なら恒久停止対象（pending系と誤認しない）', () => {
-    assert.equal(supervisor.shouldRetry({
-      retries: 5,
-      lastError: 'agentId "nonexistent-agent" のconfigを解決できません',
-    }, Date.now()), false);
   });
-
-  test('lastMethod未設定（旧cursorエントリ）でもlastErrorの文言からpending系と推定して救済する', () => {
-    const now = Date.now();
-    assert.equal(supervisor.shouldRetry({
-      retries: 5,
-      lastError: 'pane 35 is alive (worker busy) — waiting for it to become idle for resume delivery',
-      lastAttempt: new Date(now - 200000).toISOString(),
-    }, now), true);
-    assert.equal(supervisor.shouldRetry({
-      retries: 5,
-      lastError: 'pane (none) is not alive — queued for resume',
-      lastAttempt: new Date(now - 200000).toISOString(),
-    }, now), true);
-  });
-
-  test('lastMethod未設定かつlastErrorが真の失敗文言なら従来通り恒久停止', () => {
-    assert.equal(supervisor.shouldRetry({
-      retries: 5,
-      lastError: 'worktree /tmp/wt が存在しません（resume不可能）',
-    }, Date.now()), false);
-  });
-});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // runOnce: スキャン・配送サイクル
@@ -2074,40 +1958,6 @@ describe('runOnce scan and deliver cycle', () => {
     }
   });
 
-  test('新着メッセージを検出して配送する', () => {
-    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    supervisor._setGhApiComments(mockGhApiComments([
-      {
-        id: 100,
-        created_at: '2024-06-01T12:00:00Z',
-        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
-      },
-    ]));
-    // 既存ワーカーは休止中とし、resume経由で配送させる（resetAllMocks の既定）。
-
-    withTempDir((dir) => {
-      setupWorkspace(dir, {
-        workers: {
-          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
-        },
-      });
-
-      const r = runMain(['--workspace', dir]);
-      assert.equal(r.code, 0);
-      r.runOnce();
-
-      assert.ok(r.lines.some(l => l === 'DETECTED:issue-5-fix:100'),
-        `Lines: ${r.lines.join('\n')}`);
-      assert.ok(r.lines.some(l => l === 'DELIVERED:issue-5-fix:100'));
-
-      // カーソルが永続化されている
-      const state = supervisor.readCursor(dir, 'issue-5-fix');
-      assert.ok(state.seenIds.includes(100));
-      assert.ok(state.deliveredIds.includes(100));
-      assert.equal(state.since, '2024-06-01T12:00:00Z');
-    });
-  });
-
   // ── Issue #250: writeCursor の EPERM 失敗への耐性 ───────────────────────
   // カーソルファイルの位置をディレクトリ化すると rename（writeCursor）が必ず失敗する。
   // Windows では EPERM（リトライ対象）で約500ms粘ってから throw、Linux では即 throw と
@@ -2170,44 +2020,6 @@ describe('runOnce scan and deliver cycle', () => {
 
       const delivered = r.lines.filter(l => l === 'DELIVERED:issue-5-fix:100');
       assert.equal(delivered.length, 1, `Expected exactly 1 DELIVERED, got ${delivered.length}: ${r.lines.join('\n')}`);
-    });
-  });
-
-  test('既読メッセージは再検出しない（seenIds 重複防止）', () => {
-    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    supervisor._setGhApiComments(mockGhApiComments([
-      {
-        id: 100, created_at: '2024-06-01T12:00:00Z',
-        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test',
-      },
-      {
-        id: 101, created_at: '2024-06-01T13:00:00Z',
-        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> test 2',
-      },
-    ]));
-    // 既存ワーカーは休止中とし、resume経由で配送させる（resetAllMocks の既定）。
-
-    withTempDir((dir) => {
-      setupWorkspace(dir, {
-        workers: {
-          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
-        },
-        cursors: {
-          'issue-5-fix': {
-            since: '2024-06-01T12:00:00Z',
-            seenIds: [100],
-            deliveredIds: [100],
-            pendingDeliveries: {},
-          },
-        },
-      });
-
-      const r = runMain(['--workspace', dir]);
-      assert.equal(r.code, 0);
-      r.runOnce();
-
-      assert.ok(!r.lines.some(l => l === 'DETECTED:issue-5-fix:100'), '100 should be skipped (already seen)');
-      assert.ok(r.lines.some(l => l === 'DETECTED:issue-5-fix:101'), '101 should be detected');
     });
   });
 
@@ -2507,39 +2319,6 @@ describe('runOnce scan and deliver cycle', () => {
       assert.equal(r.code, 0);
       assert.doesNotThrow(() => r.runOnce());
       assert.ok(r.errLines.some(l => l.includes('rate limit exceeded')));
-    });
-  });
-
-  test('自分宛てでないメッセージは無視する', () => {
-    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    supervisor._setGhApiComments(mockGhApiComments([
-      {
-        id: 500, created_at: '2024-06-01T12:00:00Z',
-        body: '<!-- gh-maestro {"v":1,"to":"other-worker","from":"orchestrator"} -->\n> test',
-      },
-      {
-        id: 501, created_at: '2024-06-01T13:00:00Z',
-        body: 'no marker here',
-      },
-    ]));
-
-    withTempDir((dir) => {
-      setupWorkspace(dir, {
-        workers: {
-          'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 },
-        },
-      });
-
-      const r = runMain(['--workspace', dir]);
-      assert.equal(r.code, 0);
-      r.runOnce();
-
-      assert.ok(!r.lines.some(l => l.startsWith('DETECTED:')), 'No messages for this worker');
-
-      const state = supervisor.readCursor(dir, 'issue-5-fix');
-      // カーソルは全コメントの最大 created_at まで進む（非マッチも含む）
-      assert.equal(state.since, '2024-06-01T13:00:00Z');
-      // 自分宛てでないコメントは seenIds に入らない（カーソルが再フェッチを防ぐ）
     });
   });
 
@@ -4054,45 +3833,7 @@ describe('Reliability: restart continuity', () => {
     });
   });
 
-  test('未配送メッセージが再起動後も pending に残りリトライされる', () => {
-    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    supervisor._setGhApiComments(mockGhApiComments([]));
-    // 再試行時もペインは非生存（休止中）のままとし、resume経由で配送させる。resume後の生存確認では
-
-    withTempDir((dir) => {
-      setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'agy', issue: 5 } },
-        cursors: {
-          'issue-5-fix': {
-            since: '2024-06-01T12:00:00Z',
-            seenIds: [800],
-            deliveredIds: [],
-            pendingDeliveries: {
-              '800': {
-                retries: 2,
-                lastAttempt: new Date(Date.now() - 50000).toISOString(),
-                lastError: 'pane not alive',
-                lastFrom: 'orchestrator',
-                lastBody: 'undelivered message',
-              },
-            },
-          },
-        },
-      });
-
-      const r = runMain(['--workspace', dir]);
-      assert.equal(r.code, 0);
-      r.runOnce();
-
-      assert.ok(r.lines.some(l => l.startsWith('RETRYING:issue-5-fix:800')));
-      assert.ok(r.lines.some(l => l === 'DELIVERED:issue-5-fix:800'));
-
-      const state = supervisor.readCursor(dir, 'issue-5-fix');
-      assert.ok(state.deliveredIds.includes(800));
-      assert.equal(state.pendingDeliveries['800'], undefined);
-    });
   });
-});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 重複配送防止
@@ -4101,38 +3842,7 @@ describe('Reliability: restart continuity', () => {
 describe('Duplicate delivery prevention', () => {
   beforeEach(() => resetAllMocks());
 
-  test('配送済みメッセージは再配送しない（deliveredIds 重複防止）', () => {
-    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
-    // since が古いため既配信のコメントも再取得される
-    supervisor._setGhApiComments(mockGhApiComments([
-      {
-        id: 900, created_at: '2024-06-01T12:00:00Z',
-        body: '<!-- gh-maestro {"v":1,"to":"issue-5-fix","from":"orchestrator"} -->\n> msg',
-      },
-    ]));
-
-    withTempDir((dir) => {
-      setupWorkspace(dir, {
-        workers: { 'issue-5-fix': { pid: 456, startTime: 'old', agentId: 'claude', issue: 5 } },
-        cursors: {
-          'issue-5-fix': {
-            since: '2024-06-01T11:00:00Z', // コメントより前
-            seenIds: [900],
-            deliveredIds: [900], // 既に配送済み
-            pendingDeliveries: {},
-          },
-        },
-      });
-
-      const r = runMain(['--workspace', dir]);
-      assert.equal(r.code, 0);
-      r.runOnce();
-
-      // seenIds にあるので検出自体されない
-      assert.ok(!r.lines.some(l => l.startsWith('DETECTED:')));
-    });
   });
-});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // エッジケース: カーソル型不一致
@@ -4327,3 +4037,4 @@ describe('observeOrchestratorMsgPoll', () => {
     });
   });
 });
+

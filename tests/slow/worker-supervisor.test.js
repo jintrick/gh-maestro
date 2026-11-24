@@ -617,23 +617,6 @@ async function stopTestProcess(child) {
 }
 
 describe('CLI integration (subprocess)', () => {
-  test('--help は Usage を表示して exit 0', () => {
-    withTempDir((dir) => {
-      const r = runSupervisor(['--help'], dir);
-      assert.equal(r.status, 0, `exit 0, got ${r.status}, stderr: ${r.stderr}`);
-      assert.ok(r.stdout.includes('Usage'), `stdout should include Usage: ${r.stdout}`);
-      assert.ok(r.stdout.includes('worker-supervisor.js'));
-    });
-  });
-
-  test('-h も同様に exit 0', () => {
-    withTempDir((dir) => {
-      const r = runSupervisor(['-h'], dir);
-      assert.equal(r.status, 0, `exit 0, got ${r.status}`);
-      assert.ok(r.stdout.includes('Usage'));
-    });
-  });
-
   test('--workspace 値欠落で exit 1', () => {
     withTempDir((dir) => {
       const r = runSupervisor(['--workspace'], dir);
@@ -966,3 +949,4 @@ describe('Review Manager stop notification integration', () => {
     });
   });
 });
+

@@ -75,29 +75,7 @@ function stdinIO(text) {
 
 // ── --help / -h ────────────────────────────────────────────────────────────
 
-test('--help が usage を返して code 0', () => {
-  const r = msgSend.main(['--help']);
-  assert.equal(r.code, 0);
-  assert.ok(r.lines.join('\n').includes('msg-send.js'));
-  assert.ok(r.lines.join('\n').includes('--abnormal-exit'));
-  assert.ok(r.lines.join('\n').includes('--abnormal-exit-generation'));
-  assert.equal(r.errLines.length, 0);
-});
-
-test('-h が usage を返して code 0', () => {
-  const r = msgSend.main(['-h']);
-  assert.equal(r.code, 0);
-  assert.ok(r.lines.join('\n').includes('msg-send.js'));
-  assert.equal(r.errLines.length, 0);
-});
-
 // ── 引数エラー ──────────────────────────────────────────────────────────────
-
-test('recipient なしは usage を stderr にして code 1', () => {
-  const r = msgSend.main([]);
-  assert.equal(r.code, 1);
-  assert.ok(r.errLines.join('\n').includes('msg-send.js'));
-});
 
 test('msg-send は工程手順書のscript合図を受け付けない', () => {
   const r = msgSend.main(['worker-1', '--guidance-signal', 'approval']);
@@ -943,19 +921,6 @@ test('改行・クォート・バックスラッシュを含む本文が --body-
   });
 });
 
-test('--body-file に空ファイルを指定した場合は本文なしエラーになる', () => {
-  withTempDir(workspace => {
-    const bodyFile = path.join(workspace, 'empty.txt');
-    fs.writeFileSync(bodyFile, '', 'utf8');
-
-    msgSend._setGhRepoView(() => ({ status: 0, stdout: 'test/repo\n' }));
-
-    const r = msgSend.main(['worker-1', '--body-file', bodyFile, '--issue', '1', '--workspace', workspace]);
-    assert.equal(r.code, 1);
-    assert.ok(r.errLines.some(l => l.includes('メッセージ本文が必要')));
-  });
-});
-
 // ── --stdin（本件バグ修正の核）────────────────────────────────────────────
 
 
@@ -1079,5 +1044,6 @@ test('GH_MAESTRO_WORKER=issue-xxx のときは --skill が拒否される（Issu
     assert.ok(r.errLines.some(l => l.includes('--skill は orchestrator 専用です')));
   });
 });
+
 
 

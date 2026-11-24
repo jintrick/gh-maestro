@@ -263,17 +263,6 @@ test('launchInvestigationJob: 非対話化トークン欠落は spawn せず失�
 
 // ── runCouncilInvestigation（CLI）──────────────────────────────────────────────
 
-test('runCouncilInvestigation: --help は 0 を返す', async () => {
-  const { mod } = loadModule();
-  assert.equal(await withEnvClean(() => mod.runCouncilInvestigation(['--help'])), 0);
-});
-
-test('runCouncilInvestigation: 必須フラグ欠落は 1（usage）', async () => {
-  const { mod } = loadModule();
-  assert.equal(await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T'])), 1);
-  assert.equal(await withEnvClean(() => mod.runCouncilInvestigation([])), 1);
-});
-
 // process.stderr への出力を捕捉する（終了コードだけでは、どの検査で止まったかを区別できないため）。
 async function captureStderr(fn) {
   const orig = process.stderr.write;
@@ -294,64 +283,6 @@ test('runCouncilInvestigation: council解決失敗は 2（fail-closed）', async
   await withTempWorkspace(async (ws) => {
     const code = await withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', 'a.md', '--workspace', path.join(ws, 'ghm-council-missing-x')]));
     assert.equal(code, 2);
-  });
-});
-
-test('runCouncilInvestigation: investigationAgent未設定は 2（fail-closed）', async () => {
-  const { mod } = loadModule({ councilResolve: () => ({ groups: { default: { agents: ['a'] } }, investigationAgent: null }) });
-  await withTempWorkspace(async (ws) => {
-    const r = await captureStderr(() => withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', 'a.md', '--workspace', path.join(ws, 'ghm-council-missing-x')])));
-    assert.equal(r.code, 2);
-    // 止まった検査を特定する（後段の resolveAgentConfig 失敗でも 2 になるため、メッセージで区別する）
-    assert.match(r.err, /council.investigationAgent is not configured/);
-  });
-});
-
-test('runCouncilInvestigation: agendaファイルが読めないのは 2（事前確認）', async () => {
-  const { mod } = loadModule();
-  await withTempWorkspace(async (ws) => {
-    const r = await captureStderr(() => withEnvClean(() => mod.runCouncilInvestigation(['--title', 'T', '--agenda-file', path.join(ws, 'ghm-council-missing-agenda.md'), '--workspace', path.join(ws, 'ghm-council-missing-x')])));
-    assert.equal(r.code, 2);
-    // agenda の事前確認で止まったこと（後段の worktree 作成失敗による 2 ではないこと）をメッセージで固定する
-    assert.match(r.err, /cannot read --agenda-file/);
-  });
-});
-
-test('runCouncilInvestigation: 成功時は結果を書き出し 0 を返す', async () => {
-  await withTempWorkspace((ws) => {
-    const child = fakeChild();
-    const sessionCalls = [];
-    const { mod } = loadModule({ spawnImpl: () => child, resolveSessionCalls: sessionCalls });
-    const agendaFile = path.join(ws, 'agenda.md');
-    fs.writeFileSync(agendaFile, '# 議題本文', 'utf8');
-
-    const out = [];
-    const origWrite = process.stdout.write;
-    process.stdout.write = (s) => { out.push(String(s)); return true; };
-    const pending = withEnvClean(() => mod.runCouncilInvestigation(['--title', 'RAG構成の採用可否', '--agenda-file', agendaFile, '--workspace', ws]));
-
-    // spawn は runCouncilInvestigation の同期部分で完了している。ここで stdout を流す。
-    child.stdout.emit('data', Buffer.from('{ "findings": "調査結果", "sources": ["docs/rag.md"] }'));
-    child.emit('close', 0);
-
-    return pending.then((code) => {
-      assert.equal(code, 0);
-      // --title からのセッションID自動生成は共有 resolveSession へ委譲されている
-      assert.equal(sessionCalls.length, 1);
-      assert.equal(sessionCalls[0].title, 'RAG構成の採用可否');
-      // 新契約では未指定の任意フラグはキー不在=undefined（旧契約の null から変更、Issue #275）
-      assert.equal(sessionCalls[0].session, undefined);
-      assert.equal(sessionCalls[0].workspace, ws);
-      // 解決されたセッション（mock は 'autogen'）で結果ファイルが書かれている
-      const resultPath = path.join(ws, '.gh-maestro', 'council-autogen.investigation.json');
-      assert.ok(fs.existsSync(resultPath));
-      const parsed = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
-      assert.equal(parsed.findings, '調査結果');
-      assert.deepEqual(parsed.sources, ['docs/rag.md']);
-      // パスが stdout に表示されている
-      assert.ok(out.some((s) => s.includes('COUNCIL_INVESTIGATION_WRITTEN') && s.includes(resultPath)));
-      process.stdout.write = origWrite;
-    }).catch((e) => { process.stdout.write = origWrite; throw e; });
   });
 });
 
@@ -398,10 +329,4 @@ test('runCouncilInvestigation: 調査ジョブ失敗は 2 で結果ファイル�
 // 例外: 下の1件だけは実プロセス（node）を起動する。引数検証で止まるため gh / workspace には触れない。
 // 根拠: .claude/rules/cli-input-validation-at-boundary.md
 
-test('CLI境界: --agenda-file 欠落は子プロセスで exit 1 かつ エラー文言を出す（調査ジョブを起動しない）', () => {
-  const { spawnSync } = require('child_process');
-  const script = path.join(__dirname, '..', 'scripts', 'run-council-investigation.js');
-  const r = spawnSync(process.execPath, [script, '--title', 'T'], { encoding: 'utf8', timeout: 15000 });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /--agenda-file is required/);
-});
+

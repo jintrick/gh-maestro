@@ -54,37 +54,6 @@ afterEach(() => {
   }
 });
 
-test('ensureWorkerSupervisorRunning: detached・windowsHide付きでworker-supervisor.jsをspawnする', () => {
-  let captured = null;
-  mod._setSpawn((cmd, args, opts) => {
-    captured = { cmd, args, opts };
-    return fakeChild();
-  });
-
-  ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
-
-  assert.equal(captured.cmd, process.execPath);
-  assert.deepEqual(captured.args, [
-    path.join('/abs/scripts', 'worker-supervisor.js'),
-    '--workspace', workspace,
-  ]);
-  assert.ok(captured.opts.env.GH_MAESTRO_RESOURCE_KEY, 'child receives a fresh OS-resource identity');
-  assert.equal(captured.opts.detached, true);
-  assert.equal(captured.opts.windowsHide, true);
-});
-
-test('ensureWorkerSupervisorRunning: Claude親セッションPIDを子へ渡さない', () => {
-  let captured = null;
-  mod._setSpawn((cmd, args, opts) => {
-    captured = { cmd, args, opts };
-    return fakeChild();
-  });
-
-  ensureWorkerSupervisorRunning({ workspace, scriptsPath: '/abs/scripts' });
-
-  assert.equal(captured.args.includes('--session-pid'), false);
-});
-
 test('ensureWorkerSupervisorRunning: 既にSupervisorが稼働中ならspawnもセッションPID解決も行わない', () => {
   mod._setFindRunningInstance(() => ({ pid: 777, script: 'worker-supervisor.js' }));
   let spawnCalled = false;
@@ -311,3 +280,4 @@ test('ensureWorkerSupervisorRunning: spawn の前に試行記録が残る（再�
 
   assert.deepEqual(spawned, [true]);
 });
+

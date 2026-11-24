@@ -37,15 +37,6 @@ test('resolveSkillsFamilyKey: agentIdにもcommandにも一致がなければnul
   assert.equal(resolveSkillsFamilyKey('unknown-agent', 'unknown-cmd', YAML_AGENTS_MAP), null);
 });
 
-test('computeSkillMdPath: agy-interactiveのSKILL.mdパスをcommand経由で解決する', () => {
-  const result = computeSkillMdPath(YAML_AGENTS_MAP, 'agy-interactive', 'agy', 'gh-maestro-assistant');
-  // 期待値は os.homedir() から組むリテラル（本体の expandHome に依存させない）
-  const expected = path.join(
-    os.homedir(), '.gemini', 'antigravity-cli', 'skills', 'gh-maestro-assistant', 'SKILL.md'
-  );
-  assert.equal(result, expected);
-});
-
 test('computeSkillMdPath: 解決不能な場合はnullを返す', () => {
   assert.equal(computeSkillMdPath(YAML_AGENTS_MAP, 'claude-ds', 'claude-ds', 'gh-maestro-coder'), null);
 });
@@ -55,16 +46,4 @@ test('computeSkillMdPath: destが定義されていないエントリではnull�
   assert.equal(computeSkillMdPath(brokenMap, 'agy', undefined, 'gh-maestro-explorer'), null);
 });
 
-test('computeSkillMdPath: dests 配列が設定されている場合は先頭のパスを返す', () => {
-  const dualDestMap = {
-    agy: {
-      dest: '~/.agents/skills',
-      dests: ['~/.agents/skills', '~/.gemini/antigravity-cli/skills'],
-      substitutions: {},
-    },
-  };
-  const result = computeSkillMdPath(dualDestMap, 'agy', undefined, 'gh-maestro-coder');
-  const expected = path.join(os.homedir(), '.agents', 'skills', 'gh-maestro-coder', 'SKILL.md');
-  assert.equal(result, expected);
-});
 

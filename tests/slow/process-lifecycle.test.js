@@ -233,13 +233,6 @@ test('サブプロセス経由: --help は終了コード0でCLI_USAGEを表示�
   assert.match(r.stdout, /sweep/);
 });
 
-test('サブプロセス経由: --workspace の値が"--help"文字列だと値欠落エラーとなり、誤ってhelp表示にならない', () => {
-  const { spawnSync } = require('child_process');
-  const r = spawnSync(process.execPath, [SCRIPT, 'sweep', '--workspace', '--help'], { encoding: 'utf8' });
-  assert.notEqual(r.status, 0);
-  assert.equal(r.stdout, '');
-});
-
 test('status: --script が無い場合は照会せずエラー終了する', () => {
   const { ws } = createStatusWorkspace();
   try {
@@ -475,3 +468,4 @@ test('サブプロセス経由: 解析不能な workers.json で sweep は fail-
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
+

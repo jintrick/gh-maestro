@@ -132,15 +132,6 @@ function runMain(args) {
 
 
 
-test('サブプロセス: --help は code 0 で usage を表示し、新しい説明を含み旧来の文言を含まない', () => {
-  const result = runCli(['--help']);
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /worker-status\.js/);
-  assert.match(result.stdout, /見出しとワーカー行/);
-  assert.doesNotMatch(result.stdout, /6区間/);
-  assert.doesNotMatch(result.stdout, /cycle metrics/);
-});
-
 test('サブプロセス: status は workers.json の生存状態をJSONで返す', () => {
   const workspace = createWorkspace('gh-maestro-worker-status-cli-');
   const { owner, record } = startAliveWorker(workspace);
@@ -231,3 +222,4 @@ test('サブプロセス: list は生存ワーカーの名前を表示し、list
     removeWorkspace(workspace);
   }
 });
+

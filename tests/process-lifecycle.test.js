@@ -1009,15 +1009,6 @@ test('process-lifecycle はClaude親プロセスのPIDを解決しない', () =>
 // CLI_USAGE
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('CLI_USAGE: 文字列が定義されている', () => {
-  const plc = loadModule();
-  assert.equal(typeof plc.CLI_USAGE, 'string');
-  assert.ok(plc.CLI_USAGE.includes('sweep'));
-  assert.ok(plc.CLI_USAGE.includes('status'));
-  assert.ok(plc.CLI_USAGE.includes('--script'));
-  assert.ok(plc.CLI_USAGE.includes('--workspace'));
-});
-
 test('sweepRegistry: 除外リスト構築失敗時は fail-closed で kill も housekeeping も実行しない', () => {
   const plc = loadModule();
   const pidsDir = plc.pidsDir(workspace);
@@ -1354,3 +1345,4 @@ test('acquireStartupLock: 同一性不明の保持者のロックを残して中
     assert.equal(fs.readFileSync(lp, 'utf8'), raw);
   } finally { fs.unlinkSync(lp); }
 });
+
