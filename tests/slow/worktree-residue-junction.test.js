@@ -158,3 +158,59 @@ test('spawn-worker: リンクを外せたか判定できないときは作業場
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('spawn-worker: worktree を失った同名ローカルブランチに --base-branch 未含のコミットがあれば、削除も再作成もせず非ゼロ終了する（Issue #811）', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghm-spawn-unmerged-'));
+  try {
+    const seed = path.join(base, 'seed');
+    const remote = path.join(base, 'origin.git');
+    const ws = path.join(base, 'ws');
+    const home = path.join(base, 'home');
+    makeRepo(seed);
+    const gitIn = (cwd, ...args) => {
+      const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+      assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+      return r;
+    };
+    gitIn(seed, 'checkout', '-qb', 'dev');
+    gitIn(base, 'clone', '--bare', '-q', seed, remote);
+    gitIn(base, 'clone', '-q', '-b', 'dev', remote, ws);
+    gitIn(ws, 'config', 'user.email', 'test@example.com');
+    gitIn(ws, 'config', 'user.name', 'test');
+
+    fs.mkdirSync(path.join(home, '.gh-maestro'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gh-maestro', 'config.json'), JSON.stringify({
+      agents: { 'test-agent': { id: 'test-agent', command: process.execPath, extraArgs: [], promptDelivery: 'positional' } },
+    }), 'utf8');
+    require('../../scripts/shared/read-state').initializeState(ws, 'orchestrator', { sessionId: 'valid-test-session' });
+
+    const workerName = 'issue-811-coder-unmerged-branch';
+    const wt = path.join(ws, '.gh-maestro', 'worktrees', workerName);
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
+    gitIn(ws, 'worktree', 'add', '-q', wt, '-b', workerName, 'origin/dev');
+    fs.writeFileSync(path.join(wt, 'work.txt'), 'unmerged work\n', 'utf8');
+    gitIn(wt, 'add', 'work.txt');
+    gitIn(wt, 'commit', '-qm', 'unmerged commit');
+    const unmergedSha = gitIn(wt, 'rev-parse', 'HEAD').stdout.trim();
+    // worktree フォルダだけが失われ、ローカルブランチに未マージコミットが残った状態を再現する
+    fs.rmSync(wt, { recursive: true, force: true });
+
+    const reachedMarker = path.join(home, 'reached-recreate.txt');
+    const preload = writeStopPreload(home, { unlinkThrows: false, reachedMarker });
+    const r = spawnSync(process.execPath, ['-r', preload, SCRIPT,
+      '--skill', 'gh-maestro-coder', '--issue', '811', '--description', 'unmerged-branch',
+      '--repo', 'o/r', '--workspace', ws, '--base-branch', 'dev',
+      '--agent', 'test-agent', '--session-id', 'valid-test-session'],
+    { encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home }, timeout: 120000 });
+
+    assert.notEqual(r.status, 0, `非ゼロ終了であること: ${r.stderr}`);
+    assert.match(r.stderr, /issue-811-coder-unmerged-branch/, `ブランチ名が出力されていること: ${r.stderr}`);
+    assert.match(r.stderr, /含まれないコミット/, `停止理由が出力されていること: ${r.stderr}`);
+    const afterSha = gitIn(ws, 'rev-parse', '--verify', `refs/heads/${workerName}`).stdout.trim();
+    assert.equal(afterSha, unmergedSha, '未マージのローカルブランチが削除・上書きされないこと');
+    assert.equal(fs.existsSync(wt), false, 'worktree が作り直されないこと');
+    assert.equal(fs.existsSync(reachedMarker), false, '再作成後の処理へ進まないこと');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

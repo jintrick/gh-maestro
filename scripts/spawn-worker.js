@@ -57,6 +57,7 @@ const { listComments, parseCommentsResponse } = require('./shared/gh-comments');
 const readStateLib = require('./shared/read-state');
 const { checkClosedPr } = require('./shared/closed-pr-guard');
 const { getCurrentBranch } = require('./shared/git-branch');
+const { runGit, OBJECT_ID_RE } = require('./shared/git-ref');
 const { recordCycleEvent } = require('./shared/cycle-metrics');
 const { readWorkersRaw } = require('./shared/workers-registry');
 const processLiveness = require('./shared/process-liveness');
@@ -144,7 +145,11 @@ Output (stdout):
 ワーカーは画面を持たないバックグラウンドプロセスとして起動し、標準出力/標準エラーは
 <workspace>/.gh-maestro/records/issue/<N>/workers/<worker>/worker.log へ実行中から逐次書き込まれる。
 ワーカー登録後の監視ペイン保証はbest-effortで、失敗時はstageと接続先をログへ残すが、
-ワーカーの起動結果は変更しない。`;
+ワーカーの起動結果は変更しない。
+worktree 作成に失敗した場合、同名のローカルブランチに --base-branch（未指定時は HEAD）へ
+含まれないコミットが無いと確認できたときだけ既存の作業場所とブランチを削除して作り直す。
+含まれないコミットが残っている場合、または残っているか判定できない場合は、ブランチを削除せず
+worktree の作り直しも行わずにエラー終了する。`;
 
 /**
  * CLI引数の構文・値だけを検証する。worktree、git、agent、外部プロセスには触れない。
@@ -476,6 +481,116 @@ function activateLaunchedWorkerLease({
   }
 }
 
+/**
+ * worktree作成失敗時に、同名ローカルブランチを削除して作り直してよいか判定する。
+ *
+ * 残骸とみなして削除してよいのは、ローカルブランチが存在しないか、ベース参照
+ * （baseBranch 指定時は refs/remotes/origin/<baseBranch>、未指定時は HEAD）に
+ * 含まれないコミットを持たない場合だけとする。git 実行失敗などで判定できない場合は
+ * フェイルクローズとして unknown を返し、呼び出し元に削除・再作成を中止させる。
+ *
+ * @param {{ workspace: string, branchName: string, baseBranch?: string|null, spawnSyncFn?: Function }} params
+ * @returns {{ status: 'absent'|'clean'|'has_unmerged_commits'|'unknown', baseRef?: string, aheadCount?: number, reason?: string }}
+ */
+function inspectLocalBranchForWorktreeRetry({
+  workspace,
+  branchName,
+  baseBranch = null,
+  spawnSyncFn = spawnSync,
+}) {
+  const branchRef = `refs/heads/${branchName}`;
+  const refCheck = runGit(
+    ['for-each-ref', '--format=%(refname) %(objectname)', '--', branchRef],
+    workspace,
+    spawnSyncFn,
+  );
+  if (refCheck.status !== 'ok') {
+    return {
+      status: 'unknown',
+      reason: `ローカルブランチ "${branchName}" の存在確認に失敗しました: ${refCheck.error || refCheck.stderr.trim() || `exit ${refCheck.exitCode}`}`,
+    };
+  }
+  const lines = refCheck.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let branchSha = null;
+  for (const line of lines) {
+    const sep = line.indexOf(' ');
+    if (sep < 0) {
+      return {
+        status: 'unknown',
+        reason: `git for-each-ref の出力形式が不正です: ${JSON.stringify(line)}`,
+      };
+    }
+    if (line.slice(0, sep) === branchRef) {
+      branchSha = line.slice(sep + 1).trim();
+      break;
+    }
+  }
+  if (branchSha === null) {
+    return { status: 'absent' };
+  }
+  if (!OBJECT_ID_RE.test(branchSha)) {
+    return {
+      status: 'unknown',
+      reason: `ローカルブランチ "${branchName}" のコミットSHAを確認できません: ${JSON.stringify(branchSha)}`,
+    };
+  }
+
+  const baseRef = baseBranch ? `refs/remotes/origin/${baseBranch}` : 'HEAD';
+  const baseCheck = runGit(
+    ['rev-parse', '--verify', '--end-of-options', `${baseRef}^{commit}`],
+    workspace,
+    spawnSyncFn,
+  );
+  if (baseCheck.status !== 'ok') {
+    return {
+      status: 'unknown',
+      baseRef,
+      reason: `ベースブランチ (${baseRef}) を解決できません: ${baseCheck.error || baseCheck.stderr.trim() || `exit ${baseCheck.exitCode}`}`,
+    };
+  }
+  const baseSha = baseCheck.stdout.trim();
+  if (!OBJECT_ID_RE.test(baseSha)) {
+    return {
+      status: 'unknown',
+      baseRef,
+      reason: `ベースブランチ (${baseRef}) のコミットSHAが不正です: ${JSON.stringify(baseSha)}`,
+    };
+  }
+
+  const revList = runGit(
+    ['rev-list', '--count', '--end-of-options', branchRef, `^${baseSha}`],
+    workspace,
+    spawnSyncFn,
+  );
+  if (revList.status !== 'ok') {
+    return {
+      status: 'unknown',
+      baseRef,
+      reason: `未統合コミット数の確認に失敗しました: ${revList.error || revList.stderr.trim() || `exit ${revList.exitCode}`}`,
+    };
+  }
+  const countText = revList.stdout.trim();
+  if (!/^\d+$/.test(countText)) {
+    return {
+      status: 'unknown',
+      baseRef,
+      reason: `git rev-list --count が不正な値を返しました: ${JSON.stringify(countText)}`,
+    };
+  }
+  const aheadCount = Number(countText);
+  if (!Number.isSafeInteger(aheadCount)) {
+    return {
+      status: 'unknown',
+      baseRef,
+      reason: `git rev-list --count の値が安全整数範囲外です: ${JSON.stringify(countText)}`,
+    };
+  }
+  if (aheadCount === 0) {
+    return { status: 'clean', baseRef, aheadCount: 0 };
+  }
+  return { status: 'has_unmerged_commits', baseRef, aheadCount };
+}
+
 module.exports = {
   shouldPruneStaleWorker,
   cleanupRolelessWorkers,
@@ -484,6 +599,7 @@ module.exports = {
   parseWorkerArgs,
   ensureStatusPaneForWorkspace,
   activateLaunchedWorkerLease,
+  inspectLocalBranchForWorktreeRetry,
   WORKER_ENDPOINT_WAIT_MS,
   _setEnsureStatusPane: (fn) => { _ensureStatusPane = fn || defaultEnsureStatusPane; },
   _setRecordCycleEvent: (fn) => { _recordCycleEvent = fn || recordCycleEvent; },
@@ -826,6 +942,24 @@ mkdirSync(resolve(workspace, '.gh-maestro', 'worktrees'), { recursive: true });
 try {
   worktreeAdd(worktreeDir, workerName, baseBranch || null, workspace);
 } catch (e) {
+  // 同名ローカルブランチにベースブランチ未含のコミットがあるか判定できない場合は、
+  // 作業場所・ブランチを削除せずリトライもせずに中止する（Issue #811、フェイルクローズ）。
+  const branchCheck = inspectLocalBranchForWorktreeRetry({
+    workspace,
+    branchName: workerName,
+    baseBranch: baseBranch || null,
+  });
+  if (branchCheck.status === 'has_unmerged_commits') {
+    const baseLabel = baseBranch ? `ベースブランチ "${baseBranch}" (${branchCheck.baseRef})` : 'ベース (HEAD)';
+    fail(
+      `ローカルブランチ "${workerName}" には ${baseLabel} に含まれないコミットが ${branchCheck.aheadCount} 件あるため、ブランチを削除せず起動を中止しました`,
+    );
+  }
+  if (branchCheck.status !== 'clean' && branchCheck.status !== 'absent') {
+    fail(
+      `ローカルブランチ "${workerName}" にベースブランチへ含まれないコミットがあるか判定できないため、ブランチを削除せず起動を中止しました: ${branchCheck.reason || branchCheck.status}`,
+    );
+  }
   console.warn(`spawn-worker: worktree作成失敗: ${e.message.split('\n')[0]} — 残骸を除去してリトライします`);
   // 残骸除去。リンクを外せたと確認できるまで、一切削除しない（Issue #737: 残ったjunctionは
   // git worktree remove / rmSync がリンク先（本体の node_modules）まで消す）。
@@ -840,10 +974,12 @@ try {
   } catch (e2) {
     fail(`前回の作業場所からリンクを外せないため、削除せずに起動を中止しました: ${e2.message.split('\n')[0]}`);
   }
-  try {
-    const delR = spawnSync('git', ['branch', '-D', '--', workerName], { cwd: workspace, stdio: 'pipe' });
-    if (delR.status !== 0) throw new Error(`git branch -D 失敗: ${(delR.stderr || '').toString().trim()}`);
-  } catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
+  if (branchCheck.status === 'clean') {
+    try {
+      const delR = spawnSync('git', ['branch', '-D', '--', workerName], { cwd: workspace, stdio: 'pipe' });
+      if (delR.status !== 0) throw new Error(`git branch -D 失敗: ${(delR.stderr || '').toString().trim()}`);
+    } catch (e2) { console.warn(`  git branch -D: ${e2.message.split('\n')[0]}`); }
+  }
   // リトライ
   try {
     worktreeAdd(worktreeDir, workerName, baseBranch || null, workspace);
