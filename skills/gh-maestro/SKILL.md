@@ -64,15 +64,25 @@ description: gh-maestroセッションをこのワークスペースで起動す
    - `CURRENT_BRANCH_COMMITS_NOT_IN_DEV` が 1 以上、または `unknown` のときは、人間の最新の作業が dev に入っていない可能性がある。最初のワーカーを起動する前に、このまま dev を基準に進めてよいか、人間が dev を更新してから進めるかを1問で確かめ、回答を得るまでワーカーを起動しない。orchestrator は dev を自分で書き換えない。
    - 両方とも 0 のときは伝えるだけで待たない。`DEV_PUSH_COMMITS_NEW_ON_REMOTE_BASE` が 1 以上のときは、GitHub に出た件数を伝える。出たコミットは取り消せないため、これを理由に待たない。
 
-5. **直近のIssue/PR**: 新しくプロジェクトに加わったメンバーと同じ姿勢で、直近何が起きていたかを見出しレベルで把握してから作業を始める。本文は読まずタイトル一覧だけを見て（本文はコンテクストを消費する。深掘りが要るときはその対象だけを読むか explorer に委譲する）、その概況を人間へ伝える。
+5. **進行中・直近の作業状況**: まず GitHub 上の未解決 Issue・PR と既存のワーカー記録から中断中の作業と直近の動きを把握する。
 
    ```sh
    gh issue list --repo $REPO --state open --limit 20
+   gh pr list --repo $REPO --state open --limit 20
    gh pr list --repo $REPO --state merged --limit 15
    ```
+
+   開いた Issue 番号 `<N>` ごとに次を実行し、前のセッションのワーカー記録が残っているかも確認する（`--json` 指定によりローカル記録だけを照会し、配列が空でなければ記録あり。読み取り失敗が stderr に出た場合はその事実も伝える）。開いた PR のブランチ名やタイトルから紐づく Issue 番号を読み取れないときは、その PR の本文だけを確認して Issue 番号を補う。
+
+   ```sh
+   node "{{SCRIPTS_PATH}}/worker-status.js" list --workspace $WORKSPACE --issue <N> --json
+   ```
+
+   - **中断中の作業**: マージされていない開いた PR がある Issue、またはワーカーの記録が残っている Issue がある場合は、起動時の報告で Issue 番号・PR 番号（PR 未作成時は PR なし／ワーカー記録あり）とともに人間へ伝える。該当する作業が無いときは、そのことを報告しない。起動時点ではワーカーや PR 監視を自動で再開せず、再開するかは人間の判断を待つ。
+   - **直近の Issue/PR 概況**: 開いた Issue と直近マージ済み PR のタイトル一覧から、プロジェクトで直近何が起きていたかを見出しレベルで把握し、その概況を人間へ伝える（本文やコメント全文はここで読まない）。
 
 6. **テスト層宣言**: セッションコンテキストの `TEST_LAYERS_STATUS` が `missing` または `invalid` なら、`gh-maestro-test-setup` スキルを読んで従う。提案を人間へ提示して承認を得るまで、対象プロジェクトのテストや設定を変更しない。承認後の設定・テスト配置・実行結果の確認まで終えてから次へ進む。`invalid` を理由に初期化やコンテキスト出力をやり直さず、出力された状態を使う。
 
 7. **壊れた config.json**: セッションコンテキストに `CONFIG_JSON_BROKEN=<path> (<理由>)` の行があれば、gh-maestro はそのファイルを使えず既定値で動いている。パスと理由を人間へ伝える。gh-maestro はこのファイルを書き換えないため、直すのは人間である。
 
-8. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。
+8. `gh-maestro-orchestrator` スキルのゴール定義に従ってorchestratorとして動作を開始する。人間が中断中の作業の再開を選んだ場合は、`gh-maestro-orchestrator` の「中断中の作業の再開」に従って現在工程を読み取ってから進める。

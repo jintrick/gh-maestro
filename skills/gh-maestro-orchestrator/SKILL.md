@@ -137,7 +137,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 
 ## 開発サイクル
 
-各工程の実行手順は対応するstageファイルを開いて確認する。本節には工程をまたぐ順序、入口、待機、遷移だけを置く。
+各工程の実行手順は対応するstageファイルを開いて確認する。本節には工程をまたぐ順序、入口、待機、遷移だけを置く。新規の作業は工程 1 から進め、前のセッションから残った中断中の作業を人間が再開すると決めた場合は「中断中の作業の再開」に従って現在工程を読み取ってから該当工程へ入る。
 <!-- gh-maestro-structure: stages=9 -->
 
 **番号と呼称の規約**:
@@ -229,7 +229,7 @@ ADR作成前に `node "{{SCRIPTS_PATH}}/create-adr.js" --next --slug <slug> --wo
 
 | 到着イベント・契機 | 一次対応 | 次の工程・処理先 |
 |---|---|---|
-| セッション開始、/gh-maestro起動 | plugin monitorがロードされたことを確認する。受信monitorを手動で張り直さない。 | 横断手続き「セッションの受信monitorとInbox Supervisor」 |
+| セッション開始、/gh-maestro起動 | plugin monitorがロードされたことを確認する。受信monitorを手動で張り直さない。 | 横断手続き「セッションの受信monitorとInbox Supervisor」および「中断中の作業の再開」 |
 | セッション開始時の$WORKSPACE/.gh-maestro/sync-failures/確認 | 失敗記録があれば、対象ファイルの確認と再同期という人間の次の操作を依頼する。 | 横断手続き「セッションの受信monitorとInbox Supervisor」 |
 | PLAN_REPORTED:<issue>:<planCommentId> | 計画URL報告のcarrierコメントは既読化済み。`msg-read.js --plan --issue <issue> --workspace $WORKSPACE` でpin済み計画を読む。 | 工程5。NEW_MESSAGEは重ねて出力されない。 |
 | NEW_MESSAGE:<issue>:<commentId> | `msg-read.js <commentId> --workspace $WORKSPACE` で本文を読む。plan-report以外の報告・障害を本文から判定する。 | 該当工程、PR/Review Manager通知、または障害対応。 |
@@ -269,6 +269,19 @@ PR監視・受信monitorの停止、slow state、worker-statusの復旧詳細は
 ### セッション変数
 
 起動フックがプロンプト先頭の `[gh-maestro session context]` に設定する `SESSION_ID` は、`spawn-worker.js` の必須引数 `--session-id` に渡す。セッションコンテキストから読み取り、手動で取得・設定しない。
+
+### 中断中の作業の再開
+
+人間が前のセッションで中断した作業の再開を選んだときは、工程1からやり直さず、まずその作業がどの工程まで進んでいたかを読み取ってから進める。
+
+1. **GitHubと既存記録から現在工程を読み取る**:
+   - 対象 Issue の本文・コメント（確定済み要件、前提確認、設計コメント、pin 済み計画、承認記録、決定事項など）を読む。
+   - 関連 PR（開いた PR または直近のマージ済み PR）があれば、PR の状態（Draft か公開か、マージ済みか）、PR コメント、レビューコメント、レビュースレッド（`review-threads.js status`）、テスト結果申告（`query-test-status.js`）、CI checks（`query-pr-checks.js`）、および Review Manager の出力（`read-review-findings.js`）を確認する。
+   - PR 未作成またはワーカー状態の確認が必要な場合は、`worker-status.js list --workspace $WORKSPACE --issue <N> --json` でワーカー記録も照会する。
+   - 以上から、計画未報告（工程4）・計画評価待ち（工程5）・実装中（工程6）・レビュー／トリアージ／修正push対応／マージ判断待ち（工程7）・デプロイ確認（工程8）・反省会および後始末（工程9）のどこまで進んでいたかを特定する。
+2. **該当工程の手順書を開いて続きを進める**:
+   - 特定した現在工程に対応する手順書（`stage-1-requirements.md`〜`stage-9-retrospective.md`、トリアージ中なら `triage.md`、軽量 PR なら `lightweight-pr.md`、監視・Review Manager の復旧が必要なら `monitor-recovery.md`）を開いて読み、その工程の途中から再開する。
+   - セッション開始時のリセットにより前セッションの PR 監視 target・worktree・ワーカープロセスは消えているため、PR の監視が引き続き必要な工程では `activate-pr-monitor.js` で target を再設定する（既にレビュー済みで再レビューが不要なら `--no-review-manager` を付け、軽量 PR なら `--no-review-manager --no-review-events` を付ける）。残っている確認・修正依頼・マージ依頼・後始末をその工程の規約どおりに進める。
 
 ### ワーカーの役割・モデル配分と起動
 
