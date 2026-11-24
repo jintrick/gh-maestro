@@ -112,9 +112,20 @@ function buildEvent(issue, event, details = {}, nowFn = Date.now) {
   return result;
 }
 
+function formatErrorReason(error) {
+  return error && error.message ? error.message : String(error);
+}
+
+function writeDefaultStderr(message) {
+  try {
+    process.stderr.write(`${message}\n`);
+  } catch { /* best-effort */ }
+}
+
 /**
  * JSONLへ1イベントを同期追記する。記録経路は意図的にbest-effortで、
  * パス検証・ディレクトリ作成・書き込みの失敗を呼び出し元へ投げ返さない。
+ * warnFn 未指定時は標準エラー出力へ対象記録と失敗理由を警告する。
  *
  * @returns {{ok:boolean,event?:object,path?:string,error?:Error}}
  */
@@ -129,8 +140,16 @@ function recordCycleEvent(workspace, issue, event, details = {}, deps = {}) {
     appendFileFn(filePath, `${JSON.stringify(entry)}\n`);
     return { ok: true, event: entry, path: filePath };
   } catch (error) {
-    const warnFn = deps.warnFn;
-    if (typeof warnFn === 'function') warnFn(error);
+    const warnFn = deps && deps.warnFn;
+    try {
+      if (typeof warnFn === 'function') {
+        warnFn(error);
+      } else if (warnFn === undefined) {
+        writeDefaultStderr(
+          `cycle-metrics: 記録に失敗しました (issue=${issue}, event=${event}): ${formatErrorReason(error)}`,
+        );
+      }
+    } catch { /* best-effort */ }
     return { ok: false, error };
   }
 }
@@ -155,6 +174,7 @@ function parseEventLine(line) {
 /**
  * JSONLを読み取る。不正な行は他の記録を隠さないようスキップする。
  * ファイル不在はまだ打刻されていない正常な状態として空配列を返す。
+ * ファイル不在以外のエラー時、onError 未指定なら標準エラー出力へ警告を出す。
  */
 function readCycleEvents(workspace, issue, opts = {}) {
   try {
@@ -167,7 +187,16 @@ function readCycleEvents(workspace, issue, opts = {}) {
     ));
   } catch (error) {
     if (error && error.code === 'ENOENT') return [];
-    if (typeof opts.onError === 'function') opts.onError(error);
+    const onError = opts && opts.onError;
+    try {
+      if (typeof onError === 'function') {
+        onError(error);
+      } else if (onError === undefined) {
+        writeDefaultStderr(
+          `cycle-metrics: 読み取りに失敗しました (issue=${issue}): ${formatErrorReason(error)}`,
+        );
+      }
+    } catch { /* best-effort */ }
     return [];
   }
 }

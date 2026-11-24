@@ -1014,16 +1014,43 @@ function recordMergeAndSnapshot({ prState, issue, pr, repo, workspace, exitCode 
   if (prState !== 'MERGED') return { merged: false };
   const recordCycleEventFn = deps.recordCycleEventFn || recordCycleEvent;
   const postCycleSnapshotFn = deps.postCycleSnapshotFn || postCycleSnapshot;
+  const writeStderrFn = deps.writeStderrFn || null;
   const warnings = [];
   try {
-    recordCycleEventFn(workspace, issue, 'merged', { pr });
+    const eventResult = writeStderrFn
+      ? recordCycleEventFn(workspace, issue, 'merged', { pr }, {
+        warnFn: (error) => {
+          const reason = error && error.message ? error.message : String(error);
+          writeStderrFn(`poll-pr: cycle-metrics の記録に失敗しました (issue=${issue}, event=merged): ${reason}\n`);
+        },
+      })
+      : recordCycleEventFn(workspace, issue, 'merged', { pr });
+    if (eventResult && eventResult.ok === false) {
+      const reason = eventResult.error && eventResult.error.message
+        ? eventResult.error.message
+        : String(eventResult.error || 'unknown error');
+      warnings.push(`merged event: ${reason}`);
+    }
   } catch (error) {
     warnings.push(`merged event: ${error.message}`);
+    if (writeStderrFn) {
+      writeStderrFn(`poll-pr: cycle-metrics の記録に失敗しました (issue=${issue}, event=merged): ${error.message}\n`);
+    }
   }
   try {
-    postCycleSnapshotFn({ issue, pr, repo, workspace }, deps.snapshotDeps || {});
+    const snapshotResult = postCycleSnapshotFn({ issue, pr, repo, workspace }, deps.snapshotDeps || {});
+    if (snapshotResult && snapshotResult.ok === false) {
+      const reason = snapshotResult.error || 'unknown error';
+      warnings.push(`cycle snapshot: ${reason}`);
+      if (writeStderrFn) {
+        writeStderrFn(`poll-pr: cycle snapshot の投稿に失敗しました (issue=${issue}, pr=${pr}): ${reason}\n`);
+      }
+    }
   } catch (error) {
     warnings.push(`cycle snapshot: ${error.message}`);
+    if (writeStderrFn) {
+      writeStderrFn(`poll-pr: cycle snapshot の投稿に失敗しました (issue=${issue}, pr=${pr}): ${error.message}\n`);
+    }
   }
   return { merged: true, exitCode, warnings };
 }
@@ -1327,7 +1354,7 @@ async function runPollPr(params, deps = {}) {
     if (pendingSlowTests.size > 0) await Promise.all([...pendingSlowTests]);
 
     const prState = getPrStateFn(pr, repo);
-    recordMergeAndSnapshotFn({ prState, issue, pr, repo, workspace, exitCode });
+    recordMergeAndSnapshotFn({ prState, issue, pr, repo, workspace, exitCode }, { writeStderrFn });
     if (resolvePostReviewDecision(prState, exitCode) === 'resume') {
       writeStdoutFn(`PR_CLOSED_RESUMED:${pr}\n`);
       continue;

@@ -2753,3 +2753,99 @@ test('watch: 報告前異常終了の停止が記録された後に再開され�
   }
 });
 
+// ── Issue #815: cycle-metrics 読み取り失敗と記録なしの区別 ────────────────────
+
+test('worker-status: cycle-metrics 読み取り失敗時、list/list --json/watch で記録なし(ENOENT)と区別して示す', () => {
+  const { metricsPath } = require('../scripts/shared/cycle-metrics');
+  const activeStart = '2026-11-24T06:00:00.000Z';
+  const fixedNow = Date.parse(activeStart) + 30_000;
+  const workerName = 'issue-815-coder-test';
+  const liveness = createResourceLiveness({ probePid: (pid) => (pid === 30100 ? 'alive' : 'dead') });
+  const ref = liveness.captureProcess(30100, workerName);
+  const entry = liveness.writeRef({
+    pid: 30100,
+    startTime: activeStart,
+    issue: 815,
+    agentId: 'agy',
+    skill: 'gh-maestro-coder',
+  }, ref);
+
+  const missingWs = createWorkspace('gh-maestro-worker-status-815-missing-');
+  const brokenWs = createWorkspace('gh-maestro-worker-status-815-broken-');
+
+  workerStatus._setLiveness(liveness);
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setResolveRepo(() => ({ ok: true, repo: 'jintrick/gh-maestro' }));
+  workerStatus._clearRepoCache();
+
+  try {
+    writeWorkers(missingWs, { [workerName]: entry });
+    writeWorkers(brokenWs, { [workerName]: entry });
+    fs.mkdirSync(metricsPath(brokenWs, 815), { recursive: true });
+
+    // 対照: 記録なし（ENOENT）ではエラー表示も errLines も出ない
+    const missingList = runMain(['list', '--workspace', missingWs, '--issue', '815']);
+    assert.equal(missingList.code, 0);
+    assert.deepEqual(missingList.errLines, []);
+    assert.equal(missingList.lines.some(line => line.includes('cycle-metrics unavailable')), false);
+
+    const missingJson = runMain(['list', '--workspace', missingWs, '--issue', '815', '--json']);
+    assert.equal(missingJson.code, 0);
+    assert.deepEqual(missingJson.errLines, []);
+    assert.equal(JSON.parse(missingJson.lines.join('\n'))[0].cycleMetricsError, undefined);
+
+    const missingWatch = runMain(['watch', '--workspace', missingWs, '--issue', '815']);
+    assert.equal(missingWatch.code, 0);
+    assert.deepEqual(missingWatch.errLines, []);
+    assert.equal(missingWatch.lines.some(line => line.includes('cycle-metrics unavailable')), false);
+
+    // 読み取り失敗（EISDIR）: list は画面行と stderr(errLines) に失敗を出す
+    const brokenList = runMain(['list', '--workspace', brokenWs, '--issue', '815']);
+    assert.equal(brokenList.code, 0);
+    assert.ok(brokenList.lines.some(line => /cycle-metrics unavailable \(issue#815\):/.test(line)),
+      `list 出力に読み取り失敗行が含まれること: ${brokenList.lines.join('\n')}`);
+    assert.ok(brokenList.errLines.some(line => line.includes('cycle-metrics') && line.includes('815')),
+      `list の errLines に失敗警告が含まれること: ${brokenList.errLines.join('\n')}`);
+
+    // list --json: 配列契約を保ちつつ cycleMetricsError と stderr(errLines) で区別できる
+    const brokenJson = runMain(['list', '--workspace', brokenWs, '--issue', '815', '--json']);
+    assert.equal(brokenJson.code, 0);
+    const parsedBroken = JSON.parse(brokenJson.lines.join('\n'));
+    assert.equal(parsedBroken[0].cycleMetricsError, true);
+    assert.ok(brokenJson.errLines.some(line => line.includes('cycle-metrics') && line.includes('815')));
+
+    // watch: 画面上の描画行だけで示し、stderr(errLines) には積まない
+    const brokenWatch = runMain(['watch', '--workspace', brokenWs, '--issue', '815']);
+    assert.equal(brokenWatch.code, 0);
+    assert.deepEqual(brokenWatch.errLines, []);
+    assert.ok(brokenWatch.lines.some(line => /cycle-metrics unavailable \(issue#815\):/.test(line)),
+      `watch 出力に読み取り失敗行が含まれること: ${brokenWatch.lines.join('\n')}`);
+
+    // runWatchLoop の定期再描画でも stderr へ書かず画面描画にだけ含める
+    const loopStdout = [];
+    const loopStderr = [];
+    const handle = workerStatus.runWatchLoop(brokenWs, 3, {
+      issue: '815',
+      liveness,
+      nowFn: () => fixedNow,
+      resolveRepoFn: () => ({ ok: true, repo: 'jintrick/gh-maestro' }),
+      stdout: { write: (chunk) => { loopStdout.push(String(chunk)); }, rows: 20, columns: 120, isTTY: false },
+      stderr: { write: (chunk) => { loopStderr.push(String(chunk)); } },
+      setIntervalFn: () => 1,
+      clearIntervalFn: () => {},
+      onSignalFn: () => {},
+      exitFn: () => {},
+    });
+    assert.ok(handle);
+    assert.equal(loopStderr.join(''), '');
+    assert.match(loopStdout.join(''), /cycle-metrics unavailable \(issue#815\):/);
+  } finally {
+    workerStatus._setLiveness(null);
+    workerStatus._setNow(null);
+    workerStatus._setResolveRepo(null);
+    workerStatus._clearRepoCache();
+    removeWorkspace(missingWs);
+    removeWorkspace(brokenWs);
+  }
+});
+

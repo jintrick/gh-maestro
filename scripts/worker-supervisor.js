@@ -258,7 +258,7 @@ function recordDetectedWorkerStop({ workspace, issue, workerName, entry, reporte
     startTime: validStartTime,
     at: stoppedAt,
     abnormal: reported !== true,
-  });
+  }, { warnFn: null });
   if (!result || result.ok === false) {
     return {
       ok: false,

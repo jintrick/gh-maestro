@@ -162,3 +162,25 @@ test('recordMergeAndSnapshot: スナップショット失敗でも打刻とMERGE
   assert.deepEqual(events, [['C:/workspace', '450', 'merged', { pr: '99' }]]);
   assert.match(result.warnings.join('\n'), /cycle snapshot: post failed/);
 });
+
+test('recordMergeAndSnapshot: recordCycleEventが{ok:false}を返したとき警告をstderrへだけ出しstdoutを変えない', () => {
+  const stderr = [];
+  const result = recordMergeAndSnapshot({
+    prState: 'MERGED', issue: '450', pr: '99', repo: 'o/r', workspace: 'C:/workspace', exitCode: 0,
+  }, {
+    writeStderrFn: (msg) => stderr.push(msg),
+    recordCycleEventFn: (_ws, _issue, _ev, _details, deps) => {
+      const error = new Error('disk full');
+      if (deps && typeof deps.warnFn === 'function') deps.warnFn(error);
+      return { ok: false, error };
+    },
+    postCycleSnapshotFn: () => ({ ok: false, error: 'metrics Issue creation failed' }),
+  });
+
+  assert.equal(result.merged, true);
+  assert.equal(result.exitCode, 0);
+  assert.match(result.warnings.join('\n'), /merged event: disk full/);
+  assert.match(result.warnings.join('\n'), /cycle snapshot: metrics Issue creation failed/);
+  assert.match(stderr.join(''), /disk full/);
+  assert.match(stderr.join(''), /metrics Issue creation failed/);
+});

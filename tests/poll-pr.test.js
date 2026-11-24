@@ -1361,5 +1361,64 @@ test('runSlowTest does not declare when the PR HEAD changes before declaration',
   }
 });
 
+test('runPollPr routes cycle-metrics read/write failure warnings to stderr without polluting monitor stdout', async () => {
+  const { mod } = loadModule();
+  const { metricsPath } = require('../scripts/shared/cycle-metrics');
+  const { postCycleSnapshot } = require('../scripts/shared/cycle-snapshot');
+  const workspace = temporaryWorkspace('gh-maestro-poll-pr-metrics-warn-');
+  fs.mkdirSync(metricsPath(workspace, 815), { recursive: true });
+
+  const stdout = [];
+  const stderr = [];
+  const originalStderrWrite = process.stderr.write.bind(process.stderr);
+  const directStderr = [];
+  process.stderr.write = (chunk, encoding, cb) => {
+    directStderr.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+    if (typeof encoding === 'function') encoding();
+    else if (typeof cb === 'function') cb();
+    return true;
+  };
+  try {
+    const result = await mod.runPollPr({
+      issue: 815,
+      repo: 'fixture/repo',
+      workspace,
+      noReviewManager: true,
+      noReviewEvents: true,
+      intervalMs: 0,
+      intervalArg: '0',
+      enablePrChecksMonitoring: false,
+    }, {
+      checkParentFn: () => true,
+      findPrFn: () => '42',
+      spawnPollReviewsFn: async () => 0,
+      getPrStateFn: () => 'MERGED',
+      recordMergeAndSnapshotFn: (params, deps) => mod.recordMergeAndSnapshot(params, {
+        ...deps,
+        snapshotDeps: {
+          acquireLockFn: () => true,
+          releaseLockFn: () => {},
+          listMetricsIssuesFn: () => ({ status: 0, stdout: '77\n', stderr: '' }),
+          listCommentsFn: () => ({ status: 0, stdout: '[]', stderr: '' }),
+          postCommentFn: () => ({ ok: true, url: 'https://github.com/fixture/repo/issues/77#issuecomment-1' }),
+        },
+        postCycleSnapshotFn: postCycleSnapshot,
+      }),
+      cleanupFn: () => {},
+      writeStdoutFn: (text) => stdout.push(text),
+      writeStderrFn: (text) => stderr.push(text),
+    });
+
+    assert.deepEqual(result, { exitCode: 0 });
+    assert.deepEqual(stdout, ['PR_DETECTED:42\n']);
+    const combinedStderr = [...stderr, ...directStderr].join('');
+    assert.match(combinedStderr, /815/);
+    assert.match(combinedStderr, /merged/);
+    assert.match(combinedStderr, /EISDIR|illegal operation/i);
+  } finally {
+    process.stderr.write = originalStderrWrite;
+  }
+});
+
 // ── CLI起動時の即時エラー終了パス（ループに入る前にexitするため実プロセスspawn可） ──
 
