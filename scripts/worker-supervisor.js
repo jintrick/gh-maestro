@@ -226,16 +226,15 @@ function findLatestMatchingProjectedRun(events, { workerName, pid, startTime }) 
   return matched;
 }
 
-function recordDetectedWorkerStop({ workspace, issue, workerName, entry, reported, stoppedAt, onReadError }) {
-  if (!workspace || !issue || !workerName || !entry || !entry.pid) return;
-  let readFailed = false;
+function recordDetectedWorkerStop({ workspace, issue, workerName, entry, reported, stoppedAt }) {
+  if (!workspace || !issue || !workerName || !entry || !entry.pid) return { ok: true, skipped: true };
+  let readError = null;
   const events = readCycleEvents(workspace, issue, {
     onError: (err) => {
-      readFailed = true;
-      if (typeof onReadError === 'function') onReadError(err);
+      if (!readError) readError = err;
     },
   });
-  if (readFailed) return;
+  if (readError) return { ok: false, error: readError };
 
   const matchedRun = findLatestMatchingProjectedRun(events, {
     workerName,
@@ -243,14 +242,14 @@ function recordDetectedWorkerStop({ workspace, issue, workerName, entry, reporte
     startTime: entry.startTime,
   });
   // 既に停止記録（worker-exit-hook等）があるrunや、開始記録の無いrunには書き込まない。
-  if (!matchedRun || matchedRun.stopTime != null) return;
+  if (!matchedRun || matchedRun.stopTime != null) return { ok: true, skipped: true };
 
   const validStartTime = isValidTimestampString(entry.startTime) ? entry.startTime : undefined;
   let role;
   if (entry.skill) {
     try { role = deriveRoleFromSkill(entry.skill); } catch { /* ignore invalid skill */ }
   }
-  _recordCycleEvent(workspace, issue, 'worker-stopped', {
+  const result = _recordCycleEvent(workspace, issue, 'worker-stopped', {
     workerName,
     role,
     skill: entry.skill || undefined,
@@ -260,6 +259,13 @@ function recordDetectedWorkerStop({ workspace, issue, workerName, entry, reporte
     at: stoppedAt,
     abnormal: reported !== true,
   });
+  if (!result || result.ok === false) {
+    return {
+      ok: false,
+      error: (result && result.error) || new Error('worker-stopped の記録に失敗しました'),
+    };
+  }
+  return result;
 }
 
 // ── 状態管理 ──────────────────────────────────────────────────────────────
@@ -1701,16 +1707,21 @@ function main(argsOverride, opts = {}) {
 
             const stoppedAt = new Date().toISOString();
             try {
-              recordDetectedWorkerStop({
+              const recordResult = recordDetectedWorkerStop({
                 workspace,
                 issue,
                 workerName,
                 entry,
                 reported,
                 stoppedAt,
-                onReadError: (e) => writeErr(`worker-supervisor: cycle-metrics の読み取りに失敗: ${e.message}`),
               });
-            } catch { /* best-effort */ }
+              if (recordResult && recordResult.ok === false) {
+                const reason = recordResult.error?.message || String(recordResult.error || 'unknown error');
+                writeErr(`worker-supervisor: ワーカー "${workerName}" (PID ${entry.pid}) の停止記録に失敗: ${reason}`);
+              }
+            } catch (e) {
+              writeErr(`worker-supervisor: ワーカー "${workerName}" (PID ${entry.pid}) の停止記録に失敗: ${e.message}`);
+            }
 
             const reportStatusText = reported === true
               ? '報告済み'

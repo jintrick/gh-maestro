@@ -2724,11 +2724,19 @@ test('watch: 報告前異常終了の停止が記録された後に再開され�
 
     writeWorkers(workspace, { [workerName]: entry });
 
+    const snapshot = workerStatus.collectWorkerStatusSnapshot(workspace, '813', { now: fixedNow });
+    assert.equal(snapshot.workers.length, 1);
+    assert.equal(snapshot.workers[0].workerName, workerName);
+    assert.equal(snapshot.workers[0].pid, 20408);
+    assert.equal(snapshot.workers[0].running, true);
+    assert.equal(snapshot.workers[0].durationKnown, true);
+    assert.equal(snapshot.workers[0].elapsedSeconds, 304);
+
     const watchResult = runMain(['watch', '--workspace', workspace, '--issue', '813']);
     assert.equal(watchResult.code, 0);
     const workerLine = watchResult.lines.find(line => line.includes('(pid: 20408)'));
     assert.ok(workerLine, `watch 出力に稼働中ワーカー行が含まれること: ${watchResult.lines.join('\n')}`);
-    assert.ok(workerLine.includes('05:04'), `全回合計 05:04 が表示されること: ${workerLine}`);
+    assert.ok(workerLine.includes('[running]'), `稼働中状態が表示されること: ${workerLine}`);
     assert.ok(!workerLine.includes('??:??'), `??:?? にならないこと: ${workerLine}`);
 
     const listResult = runMain(['list', '--workspace', workspace, '--issue', '813', '--json']);

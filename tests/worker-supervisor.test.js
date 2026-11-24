@@ -3866,6 +3866,67 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       assert.equal(projected[0].abnormal, false);
     });
   });
+
+  test('停止記録時の cycle-metrics 読み取り失敗・書き込み失敗はワーカー名・PID・理由を警告ログへ残し停止通知は継続する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    setWorkerAlive(() => false);
+    supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    withTempDir((dir) => {
+      const startedAt = '2026-07-25T00:00:00.000Z';
+      // ケース1: recordCycleEvent が { ok: false, error } を返す場合
+      recordCycleEvent(dir, 5, 'worker-started', {
+        workerName: 'issue-5-fix',
+        role: 'coder',
+        skill: 'gh-maestro-coder',
+        agentId: 'agy',
+        pid: 456,
+        startTime: startedAt,
+        at: startedAt,
+      });
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: startedAt, agentId: 'agy', issue: 5, skill: 'gh-maestro-coder' },
+        },
+      });
+      supervisor._setRecordCycleEvent(() => ({ ok: false, error: new Error('disk full') }));
+      try {
+        const rWriteFail = runMain(['--workspace', dir]);
+        assert.equal(rWriteFail.code, 0);
+        rWriteFail.runOnce();
+        rWriteFail.residentLease.release();
+
+        assert.ok(rWriteFail.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')));
+        const errText = rWriteFail.errLines.join('\n');
+        assert.ok(errText.includes('issue-5-fix'), `警告にワーカー名が含まれること: ${errText}`);
+        assert.ok(errText.includes('456'), `警告にPIDが含まれること: ${errText}`);
+        assert.ok(errText.includes('disk full'), `警告に失敗理由が含まれること: ${errText}`);
+      } finally {
+        supervisor._setRecordCycleEvent(null);
+      }
+
+      // ケース2: cycle-metrics.jsonl の位置がディレクトリで読み取りエラーになる場合
+      const { metricsPath } = require('../scripts/shared/cycle-metrics');
+      const mPath = metricsPath(dir, 6);
+      fs.mkdirSync(mPath, { recursive: true });
+      setupWorkspace(dir, {
+        workers: {
+          'issue-6-readfail': { pid: 789, startTime: startedAt, agentId: 'agy', issue: 6, skill: 'gh-maestro-coder' },
+        },
+      });
+      const rReadFail = runMain(['--workspace', dir]);
+      assert.equal(rReadFail.code, 0);
+      rReadFail.runOnce();
+      rReadFail.residentLease.release();
+
+      assert.ok(rReadFail.lines.some(l => l.startsWith('STOP_DETECTED:issue-6-readfail:789')));
+      const readErrText = rReadFail.errLines.join('\n');
+      assert.ok(readErrText.includes('issue-6-readfail'), `読み取り失敗警告にワーカー名が含まれること: ${readErrText}`);
+      assert.ok(readErrText.includes('789'), `読み取り失敗警告にPIDが含まれること: ${readErrText}`);
+      assert.match(readErrText, /EISDIR|illegal operation/i, `読み取り失敗警告に理由が含まれること: ${readErrText}`);
+    });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
