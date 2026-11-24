@@ -45,7 +45,7 @@ const { launchAgentHeadless, workerLogPath } = require('./shared/headless-launch
 const { buildWorkerEnv } = require('./shared/worker-env');
 const { readWorkersRaw, updateWorkerProcess } = require('./shared/workers-registry');
 const { deriveRoleFromSkill, buildReviewManagerLaunchSpec } = require('./shared/worker-factory');
-const { recordCycleEvent } = require('./shared/cycle-metrics');
+const { recordCycleEvent, readCycleEvents, workerProjection, sameStartInstant } = require('./shared/cycle-metrics');
 const { observeWorker } = require('./shared/worker-liveness');
 const {
   registerProcess,
@@ -84,7 +84,6 @@ const { ARTIFACTS, legacyWorkerOwner, recordPath, recordRoot } = require('./shar
 const { inspectRunningReviewManager, reviewManagerStartingPath } = require('./shared/running-review-managers');
 const { reviewArtifactPath } = require('./shared/review-manager-paths');
 const { inspectReviewManagerResult } = require('./shared/review-manager-generation');
-const { readCycleEvents } = require('./shared/cycle-metrics');
 
 // ── 定数 ──────────────────────────────────────────────────────────────────
 
@@ -137,7 +136,7 @@ Description:
     HANG_DETECTEDを出力しorchestratorへ通知する。その後、通知した本人（同一PID+
     起動時刻）が復帰した場合のみHANG_RESUMEDを出力する。通知抑止にはworkers.jsonのPIDとworker起動時刻をカーソルキーとして使う。これは通知世代の補助情報であり、生死の判定は決定論的OS endpointを使う。
   居座り検知: ワーカーが自分の直近の起動以降に既に報告を投稿済みで、報告から10秒以上経過してもendpointがaliveの場合、STALE_REPORT_DETECTEDを出力しorchestratorへ通知する（ハング検知とは独立）。通知抑止はPIDとworker起動時刻をカーソルキーとして使う。
-  停止検知: workers.json に登録されたワーカーのendpointがdeadと判定された場合、STOP_DETECTEDを出力しorchestratorへ通知する。通知本文には hasReportedSinceStart による報告状況（報告済み/未投稿）が明記される。プロセスの停止・再起動・削除等の自動介入は行わない。
+  停止検知: workers.json に登録されたワーカーのendpointがdeadと判定された場合、STOP_DETECTEDを出力しorchestratorへ通知する。通知本文には hasReportedSinceStart による報告状況（報告済み/未投稿）が明記される。該当起動回の停止記録（worker-stopped）が cycle-metrics.jsonl に未記録であれば停止時刻を記録する。プロセスの停止・再起動・削除等の自動介入は行わない。
   Review Manager停止検知: records/pr/<PR>/review/manager.running を既存の同一性確認で調べる。結果artifactも終了フックの異常終了通知も無い停止だけを通知し、既存cursorで同じプロセスへの重複通知を抑える。判定不能もPR付きで知らせ、Review Managerの停止・再起動・workers.json登録は行わない。
   orchestrator msg-poll の決定論的endpointと世代を確認し、monitor takeover中は新しいmsg-pollへの接続を待つ。
   一定時間以内に再接続できなければ、通常終了して自分のleaseを解放する。`;
@@ -209,6 +208,59 @@ let _notifyOrchestrator = ({ workspace, issue, body }) => {
   recordResidentNotification({ workspace, source: 'worker-supervisor', issue, body });
   return { status: 0, stdout: '', stderr: '' };
 };
+
+function isValidTimestampString(value) {
+  return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
+}
+
+function findLatestMatchingProjectedRun(events, { workerName, pid, startTime }) {
+  const runs = workerProjection(events);
+  const validStartTime = isValidTimestampString(startTime) ? startTime : null;
+  let matched = null;
+  for (const run of runs) {
+    if (run.workerName !== workerName) continue;
+    if (run.pid == null || Number(run.pid) !== Number(pid)) continue;
+    if (validStartTime && (!run.startTime || !sameStartInstant(run.startTime, validStartTime))) continue;
+    matched = run;
+  }
+  return matched;
+}
+
+function recordDetectedWorkerStop({ workspace, issue, workerName, entry, reported, stoppedAt, onReadError }) {
+  if (!workspace || !issue || !workerName || !entry || !entry.pid) return;
+  let readFailed = false;
+  const events = readCycleEvents(workspace, issue, {
+    onError: (err) => {
+      readFailed = true;
+      if (typeof onReadError === 'function') onReadError(err);
+    },
+  });
+  if (readFailed) return;
+
+  const matchedRun = findLatestMatchingProjectedRun(events, {
+    workerName,
+    pid: entry.pid,
+    startTime: entry.startTime,
+  });
+  // 既に停止記録（worker-exit-hook等）があるrunや、開始記録の無いrunには書き込まない。
+  if (!matchedRun || matchedRun.stopTime != null) return;
+
+  const validStartTime = isValidTimestampString(entry.startTime) ? entry.startTime : undefined;
+  let role;
+  if (entry.skill) {
+    try { role = deriveRoleFromSkill(entry.skill); } catch { /* ignore invalid skill */ }
+  }
+  _recordCycleEvent(workspace, issue, 'worker-stopped', {
+    workerName,
+    role,
+    skill: entry.skill || undefined,
+    agentId: entry.agentId || undefined,
+    pid: entry.pid,
+    startTime: validStartTime,
+    at: stoppedAt,
+    abnormal: reported !== true,
+  });
+}
 
 // ── 状態管理 ──────────────────────────────────────────────────────────────
 
@@ -1647,6 +1699,19 @@ function main(argsOverride, opts = {}) {
               }
             }
 
+            const stoppedAt = new Date().toISOString();
+            try {
+              recordDetectedWorkerStop({
+                workspace,
+                issue,
+                workerName,
+                entry,
+                reported,
+                stoppedAt,
+                onReadError: (e) => writeErr(`worker-supervisor: cycle-metrics の読み取りに失敗: ${e.message}`),
+              });
+            } catch { /* best-effort */ }
+
             const reportStatusText = reported === true
               ? '報告済み'
               : (reported === false ? '未投稿' : '判定不能（起動時刻なし・不正）');
@@ -1664,7 +1729,7 @@ function main(argsOverride, opts = {}) {
             if (notified) {
               cursor.stoppedNotifiedPid = entry.pid;
               cursor.stoppedNotifiedStartTime = entry.startTime ?? null;
-              cursor.stoppedNotifiedAt = new Date().toISOString();
+              cursor.stoppedNotifiedAt = stoppedAt;
               writeOut(`STOP_DETECTED:${workerName}:${entry.pid}`);
             }
           }

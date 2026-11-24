@@ -2627,3 +2627,121 @@ test('mergeCycleWorkers: 現在のレジストリに対応しない未停止run�
   assert.equal(merged[0].elapsedSeconds, null);
 });
 
+
+// ── Issue #813: 異常終了後の再開稼働時間と list --json 経過秒数 ──────────────
+
+test('list --json: 過去回に停止記録が欠けていても稼働中ワーカーの elapsedSeconds は開始時刻からの実経過秒数を返し、watch は ??:?? を維持する', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-813-missing-history-');
+  const { recordCycleEvent } = require('../scripts/shared/cycle-metrics');
+  const t0 = Date.parse('2026-11-24T05:23:36.000Z');
+  const at = (sec) => new Date(t0 + sec * 1000).toISOString();
+  const activeStart = '2026-11-24T06:14:44.158Z';
+  const fixedNow = Date.parse(activeStart) + 45_000;
+  const workerName = 'issue-50-coder-impl';
+
+  const liveness = createResourceLiveness({ probePid: (pid) => (pid === 20408 ? 'alive' : 'dead') });
+  const ref = liveness.captureProcess(20408, workerName);
+  const entry = liveness.writeRef({
+    pid: 20408,
+    startTime: activeStart,
+    issue: 50,
+    agentId: 'codex',
+    skill: 'gh-maestro-coder',
+  }, ref);
+
+  workerStatus._setLiveness(liveness);
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setResolveRepo(() => ({ ok: true, repo: 'jintrick/resona' }));
+  workerStatus._clearRepoCache();
+
+  try {
+    // 第1回: 99秒、第2回: 40秒、第3回: 停止記録なし、第4回: 稼働中（45秒経過）
+    recordCycleEvent(workspace, 50, 'worker-started', { workerName, role: 'coder', agentId: 'codex', pid: 14464, startTime: at(0), at: at(0) });
+    recordCycleEvent(workspace, 50, 'worker-stopped', { workerName, pid: 14464, startTime: at(0), at: at(99), exitCode: 0, abnormal: false });
+    recordCycleEvent(workspace, 50, 'worker-started', { workerName, role: 'coder', agentId: 'codex', pid: 13712, startTime: at(200), at: at(200) });
+    recordCycleEvent(workspace, 50, 'worker-stopped', { workerName, pid: 13712, startTime: at(200), at: at(240), exitCode: 0, abnormal: false });
+    recordCycleEvent(workspace, 50, 'worker-started', { workerName, role: 'coder', agentId: 'codex', pid: 15040, startTime: at(300), at: at(300) });
+    recordCycleEvent(workspace, 50, 'worker-started', { workerName, role: 'coder', agentId: 'codex', pid: 20408, startTime: activeStart, at: activeStart });
+
+    writeWorkers(workspace, { [workerName]: entry });
+
+    const listResult = runMain(['list', '--workspace', workspace, '--issue', '50', '--json']);
+    assert.equal(listResult.code, 0);
+    const listed = JSON.parse(listResult.lines.join('\n'));
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].running, true);
+    assert.equal(listed[0].startTime, activeStart);
+    assert.equal(listed[0].elapsedSeconds, 45);
+
+    // 制約: 確定できない過去回がある間、watch の合計表示は ??:?? のまま維持する
+    const watchResult = runMain(['watch', '--workspace', workspace, '--issue', '50']);
+    assert.equal(watchResult.code, 0);
+    assert.ok(watchResult.lines.some(line => line.includes('??:??')),
+      `watch 表示は ??:?? を維持すること: ${watchResult.lines.join('\n')}`);
+  } finally {
+    workerStatus._setLiveness(null);
+    workerStatus._setNow(null);
+    workerStatus._setResolveRepo(null);
+    workerStatus._clearRepoCache();
+    removeWorkspace(workspace);
+  }
+});
+
+test('watch: 報告前異常終了の停止が記録された後に再開されたワーカーは全回の合計時間を表示し list --json は今回経過秒数を返す', () => {
+  const workspace = createWorkspace('gh-maestro-worker-status-813-recorded-stop-');
+  const { recordCycleEvent } = require('../scripts/shared/cycle-metrics');
+  const t0 = Date.parse('2026-11-24T05:00:00.000Z');
+  const at = (sec) => new Date(t0 + sec * 1000).toISOString();
+  const activeStart = at(500);
+  const fixedNow = t0 + 545_000;
+  const workerName = 'issue-813-coder-impl';
+
+  const liveness = createResourceLiveness({ probePid: (pid) => (pid === 20408 ? 'alive' : 'dead') });
+  const ref = liveness.captureProcess(20408, workerName);
+  const entry = liveness.writeRef({
+    pid: 20408,
+    startTime: activeStart,
+    issue: 813,
+    agentId: 'agy',
+    skill: 'gh-maestro-coder',
+  }, ref);
+
+  workerStatus._setLiveness(liveness);
+  workerStatus._setNow(() => fixedNow);
+  workerStatus._setResolveRepo(() => ({ ok: true, repo: 'jintrick/gh-maestro' }));
+  workerStatus._clearRepoCache();
+
+  try {
+    // 第1回: 99秒、第2回: 40秒、第3回: supervisor検知で停止記録(120秒, abnormal: true)、第4回: 稼働中(45秒)
+    // 全回合計 = 99 + 40 + 120 + 45 = 304秒 (05:04)
+    recordCycleEvent(workspace, 813, 'worker-started', { workerName, role: 'coder', agentId: 'agy', pid: 14464, startTime: at(0), at: at(0) });
+    recordCycleEvent(workspace, 813, 'worker-stopped', { workerName, pid: 14464, startTime: at(0), at: at(99), exitCode: 0, abnormal: false });
+    recordCycleEvent(workspace, 813, 'worker-started', { workerName, role: 'coder', agentId: 'agy', pid: 13712, startTime: at(150), at: at(150) });
+    recordCycleEvent(workspace, 813, 'worker-stopped', { workerName, pid: 13712, startTime: at(150), at: at(190), exitCode: 0, abnormal: false });
+    recordCycleEvent(workspace, 813, 'worker-started', { workerName, role: 'coder', agentId: 'agy', pid: 15040, startTime: at(250), at: at(250) });
+    recordCycleEvent(workspace, 813, 'worker-stopped', { workerName, role: 'coder', skill: 'gh-maestro-coder', agentId: 'agy', pid: 15040, startTime: at(250), at: at(370), abnormal: true });
+    recordCycleEvent(workspace, 813, 'worker-started', { workerName, role: 'coder', agentId: 'agy', pid: 20408, startTime: activeStart, at: activeStart });
+
+    writeWorkers(workspace, { [workerName]: entry });
+
+    const watchResult = runMain(['watch', '--workspace', workspace, '--issue', '813']);
+    assert.equal(watchResult.code, 0);
+    const workerLine = watchResult.lines.find(line => line.includes('(pid: 20408)'));
+    assert.ok(workerLine, `watch 出力に稼働中ワーカー行が含まれること: ${watchResult.lines.join('\n')}`);
+    assert.ok(workerLine.includes('05:04'), `全回合計 05:04 が表示されること: ${workerLine}`);
+    assert.ok(!workerLine.includes('??:??'), `??:?? にならないこと: ${workerLine}`);
+
+    const listResult = runMain(['list', '--workspace', workspace, '--issue', '813', '--json']);
+    assert.equal(listResult.code, 0);
+    const listed = JSON.parse(listResult.lines.join('\n'));
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].elapsedSeconds, 45);
+  } finally {
+    workerStatus._setLiveness(null);
+    workerStatus._setNow(null);
+    workerStatus._setResolveRepo(null);
+    workerStatus._clearRepoCache();
+    removeWorkspace(workspace);
+  }
+});
+
