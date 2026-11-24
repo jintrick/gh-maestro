@@ -59,6 +59,7 @@ Output (stdout):
     {"workerName":...,"running":true|false,"pid":...}
   list:
     見出しと状態付きワーカー行、または --json 指定時は status が running / abnormal / stopped の配列
+    （--json の elapsedSeconds は、稼働中のワーカーでは現在の回の startTime からの経過秒数、停止済みのワーカーでは記録上の合計経過秒数を返す）
   pane:
     STATUS_PANE_LAUNCHED: pane=<paneId>
   close-pane:
@@ -66,7 +67,7 @@ Output (stdout):
 
 Description:
   生存確認済みの workers.json と Issue の開発サイクル記録を照合し、状態付き一覧を表示する。
-  --json は既存フィールドを維持し、running / abnormal / stopped の status を追加する。
+  --json は既存フィールドを維持し、running / abnormal / stopped の status を追加する。稼働中ワーカーの elapsedSeconds は現在の回の startTime からの経過秒数（不明時は 0）を返す。
   pane サブコマンドは WezTerm の専用ペイン（既定: bottom 15%）を分割作成し、独立して自動更新し続ける。
   既存ペインが生存している場合は新しく作らず既存ペインを再利用する。記録socketの消滅を
   確実に判定でき、現在のWezTerm接続先と基準ペインが有効な場合は現在環境へrebindして記録を更新する。
@@ -247,6 +248,13 @@ function stripWorkerNamePrefix(workerName) {
 // 停止記録が無く経過時間を確定できない run の表示。0 や「-」（欠損）と区別する。
 const UNKNOWN_DURATION_LABEL = '??:??';
 
+function elapsedSecondsFromStart(startTime, now) {
+  if (!startTime) return 0;
+  const startMs = new Date(startTime).getTime();
+  if (Number.isNaN(startMs)) return 0;
+  return Math.max(0, Math.floor((now - startMs) / 1000));
+}
+
 function formatDuration(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(s / 3600);
@@ -315,12 +323,7 @@ function collectWorkersStatus(workspace, opts = {}) {
 
       if (running && entry.pid) {
         startTime = entry.startTime || null;
-        if (startTime) {
-          const startMs = new Date(startTime).getTime();
-          if (!Number.isNaN(startMs)) {
-            elapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
-          }
-        }
+        elapsedSeconds = elapsedSecondsFromStart(startTime, now);
       }
 
       results.push({
@@ -361,13 +364,7 @@ function collectWorkersStatus(workspace, opts = {}) {
 
   for (const manager of runningManagers) {
     const startTime = manager.startTime || null;
-    let elapsedSeconds = 0;
-    if (startTime) {
-      const startMs = new Date(startTime).getTime();
-      if (!Number.isNaN(startMs)) {
-        elapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
-      }
-    }
+    const elapsedSeconds = elapsedSecondsFromStart(startTime, now);
 
     const prNum = Number(manager.pr);
     const jobsForManager = runningReviewJobs.filter(j => (
@@ -375,13 +372,7 @@ function collectWorkersStatus(workspace, opts = {}) {
     ));
     const jobEntries = jobsForManager.map(job => {
       const jobStartTime = job.startTime || null;
-      let jobElapsedSeconds = 0;
-      if (jobStartTime) {
-        const startMs = new Date(jobStartTime).getTime();
-        if (!Number.isNaN(startMs)) {
-          jobElapsedSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
-        }
-      }
+      const jobElapsedSeconds = elapsedSecondsFromStart(jobStartTime, now);
       return {
         jobId: job.jobId || 'unknown',
         aspect: job.aspect || '-',
@@ -1060,11 +1051,12 @@ function main(argv = process.argv.slice(2)) {
   }
 
   if (sub === 'list') {
+    const now = _now();
     let snapshot;
     try {
       snapshot = collectWorkerStatusSnapshot(workspace, issueArg, {
-        currentWorkers: collectWorkersStatus(workspace),
-        now: _now(),
+        currentWorkers: collectWorkersStatus(workspace, { nowFn: () => now }),
+        now,
       });
     } catch (e) {
       writeErr(`worker-status: list の照会に失敗しました: ${e.message}`);
@@ -1073,15 +1065,18 @@ function main(argv = process.argv.slice(2)) {
 
     if (values['--json']) {
       const jsonEntries = snapshot.workers.map(w => {
+        // 稼働中ワーカーの elapsedSeconds は、過去回に停止記録の欠損がある場合でも
+        // 現在の回の startTime からの経過秒数を返す（不明時のみ 0）。
+        const elapsedSeconds = w.running
+          ? elapsedSecondsFromStart(w.startTime, now)
+          : (Number.isFinite(w.elapsedSeconds) ? w.elapsedSeconds : 0);
         const entry = {
           workerName: w.workerName,
           pid: w.pid,
           running: w.running,
           status: w.status,
           startTime: w.startTime,
-          // Preserve the list JSON contract used before cycle projection: elapsedSeconds is numeric.
-          // A missing start/stop timestamp has no known duration, so expose the collector's zero fallback.
-          elapsedSeconds: Number.isFinite(w.elapsedSeconds) ? w.elapsedSeconds : 0,
+          elapsedSeconds,
         };
         if (w.jobs) {
           entry.jobs = w.jobs.map(j => ({
@@ -1092,7 +1087,9 @@ function main(argv = process.argv.slice(2)) {
             running: j.running,
             status: j.running ? 'running' : 'stopped',
             startTime: j.startTime,
-            elapsedSeconds: Number.isFinite(j.elapsedSeconds) ? j.elapsedSeconds : 0,
+            elapsedSeconds: j.running
+              ? elapsedSecondsFromStart(j.startTime, now)
+              : (Number.isFinite(j.elapsedSeconds) ? j.elapsedSeconds : 0),
             agentId: j.agentId,
           }));
         }
@@ -1104,7 +1101,7 @@ function main(argv = process.argv.slice(2)) {
       const repo = _getRepo(workspace);
       const lines = renderSnapshotLines(workspace, issueArg, {
         snapshot,
-        now: _now(),
+        now,
         maxLineWidth: process.stdout.columns,
         colorize: Boolean(process.stdout.isTTY && process.env.NO_COLOR !== '1'),
         repo: repo || undefined,

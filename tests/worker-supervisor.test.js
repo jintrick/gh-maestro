@@ -19,7 +19,7 @@ const processLiveness = require('../scripts/shared/process-liveness');
 const { canonicalWorkspace } = require('../scripts/shared/storage-layout');
 const workerLiveness = require('../scripts/shared/worker-liveness');
 const runningReviewManagers = require('../scripts/shared/running-review-managers');
-const { recordCycleEvent } = require('../scripts/shared/cycle-metrics');
+const { recordCycleEvent, readCycleEvents, workerProjection } = require('../scripts/shared/cycle-metrics');
 const { writeImplementationApproval, implementationApprovalPath } = require('../scripts/shared/implementation-approval');
 
 // 起動時刻はテストプロセスについて一度だけ実測し、各main()呼び出しでは再度WMIを起動しない。
@@ -3762,6 +3762,169 @@ describe('Stopped worker detection（停止ワーカー検知）', () => {
       assert.ok(fs.existsSync(workersJsonPath), 'workers.jsonが削除されていないこと');
       const workers = JSON.parse(fs.readFileSync(workersJsonPath, 'utf8'));
       assert.ok(workers['issue-5-fix'], 'workers.json から除去されていないこと');
+    });
+  });
+
+  test('報告前に異常終了したワーカーを検知したとき cycle-metrics.jsonl に worker-stopped を記録し稼働時間を確定する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    setWorkerAlive(() => false);
+    supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    withTempDir((dir) => {
+      const startedAt = new Date(Date.now() - 125_000).toISOString();
+      recordCycleEvent(dir, 5, 'worker-started', {
+        workerName: 'issue-5-fix',
+        role: 'coder',
+        skill: 'gh-maestro-coder',
+        agentId: 'agy',
+        pid: 456,
+        startTime: startedAt,
+        at: startedAt,
+      });
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: startedAt, agentId: 'agy', issue: 5, skill: 'gh-maestro-coder' },
+        },
+      });
+
+      const r1 = runMain(['--workspace', dir]);
+      assert.equal(r1.code, 0);
+      r1.runOnce();
+      r1.residentLease.release();
+
+      const eventsAfterFirst = readCycleEvents(dir, 5);
+      const stopsAfterFirst = eventsAfterFirst.filter(e => e.event === 'worker-stopped');
+      assert.equal(stopsAfterFirst.length, 1);
+      assert.equal(stopsAfterFirst[0].workerName, 'issue-5-fix');
+      assert.equal(stopsAfterFirst[0].pid, 456);
+      assert.equal(stopsAfterFirst[0].abnormal, true);
+
+      const projected = workerProjection(eventsAfterFirst);
+      assert.equal(projected.length, 1);
+      assert.equal(projected[0].running, false);
+      assert.equal(projected[0].abnormal, true);
+      const expectedElapsed = Math.floor((Date.parse(stopsAfterFirst[0].at) - Date.parse(startedAt)) / 1000);
+      assert.equal(projected[0].elapsedSeconds, expectedElapsed);
+      assert.ok(projected[0].elapsedSeconds >= 120, `停止記録により稼働時間が確定すること: ${projected[0].elapsedSeconds}`);
+
+      // 再巡回しても二重記録されない
+      const r2 = runMain(['--workspace', dir]);
+      r2.runOnce();
+      r2.residentLease.release();
+      assert.equal(readCycleEvents(dir, 5).filter(e => e.event === 'worker-stopped').length, 1);
+    });
+  });
+
+  test('既に worker-stopped が記録済みの run は停止検知しても重複記録や abnormal 上書きをしない', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    setWorkerAlive(() => false);
+    supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    withTempDir((dir) => {
+      const startedAt = '2026-07-25T00:00:00.000Z';
+      const stoppedAt = '2026-07-25T00:01:00.000Z';
+      recordCycleEvent(dir, 5, 'worker-started', {
+        workerName: 'issue-5-fix',
+        role: 'coder',
+        skill: 'gh-maestro-coder',
+        agentId: 'agy',
+        pid: 456,
+        startTime: startedAt,
+        at: startedAt,
+      });
+      recordCycleEvent(dir, 5, 'worker-stopped', {
+        workerName: 'issue-5-fix',
+        role: 'coder',
+        skill: 'gh-maestro-coder',
+        agentId: 'agy',
+        pid: 456,
+        startTime: startedAt,
+        at: stoppedAt,
+        exitCode: 0,
+        abnormal: false,
+      });
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: startedAt, agentId: 'agy', issue: 5, skill: 'gh-maestro-coder' },
+        },
+      });
+
+      const r = runMain(['--workspace', dir]);
+      assert.equal(r.code, 0);
+      r.runOnce();
+      r.residentLease.release();
+
+      const stops = readCycleEvents(dir, 5).filter(e => e.event === 'worker-stopped');
+      assert.equal(stops.length, 1);
+      assert.equal(stops[0].abnormal, false);
+      assert.equal(stops[0].exitCode, 0);
+      assert.equal(stops[0].at, stoppedAt);
+      const projected = workerProjection(readCycleEvents(dir, 5));
+      assert.equal(projected[0].elapsedSeconds, 60);
+      assert.equal(projected[0].abnormal, false);
+    });
+  });
+
+  test('停止記録時の cycle-metrics 読み取り失敗・書き込み失敗はワーカー名・PID・理由を警告ログへ残し停止通知は継続する', () => {
+    supervisor._setGhRepoView(mockGhRepoView('test/repo'));
+    supervisor._setGhApiComments(mockGhApiComments([]));
+    setWorkerAlive(() => false);
+    supervisor._setNotifyOrchestrator(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    withTempDir((dir) => {
+      const startedAt = '2026-07-25T00:00:00.000Z';
+      // ケース1: recordCycleEvent が { ok: false, error } を返す場合
+      recordCycleEvent(dir, 5, 'worker-started', {
+        workerName: 'issue-5-fix',
+        role: 'coder',
+        skill: 'gh-maestro-coder',
+        agentId: 'agy',
+        pid: 456,
+        startTime: startedAt,
+        at: startedAt,
+      });
+      setupWorkspace(dir, {
+        workers: {
+          'issue-5-fix': { pid: 456, startTime: startedAt, agentId: 'agy', issue: 5, skill: 'gh-maestro-coder' },
+        },
+      });
+      supervisor._setRecordCycleEvent(() => ({ ok: false, error: new Error('disk full') }));
+      try {
+        const rWriteFail = runMain(['--workspace', dir]);
+        assert.equal(rWriteFail.code, 0);
+        rWriteFail.runOnce();
+        rWriteFail.residentLease.release();
+
+        assert.ok(rWriteFail.lines.some(l => l.startsWith('STOP_DETECTED:issue-5-fix:456')));
+        const errText = rWriteFail.errLines.join('\n');
+        assert.ok(errText.includes('issue-5-fix'), `警告にワーカー名が含まれること: ${errText}`);
+        assert.ok(errText.includes('456'), `警告にPIDが含まれること: ${errText}`);
+        assert.ok(errText.includes('disk full'), `警告に失敗理由が含まれること: ${errText}`);
+      } finally {
+        supervisor._setRecordCycleEvent(null);
+      }
+
+      // ケース2: cycle-metrics.jsonl の位置がディレクトリで読み取りエラーになる場合
+      const { metricsPath } = require('../scripts/shared/cycle-metrics');
+      const mPath = metricsPath(dir, 6);
+      fs.mkdirSync(mPath, { recursive: true });
+      setupWorkspace(dir, {
+        workers: {
+          'issue-6-readfail': { pid: 789, startTime: startedAt, agentId: 'agy', issue: 6, skill: 'gh-maestro-coder' },
+        },
+      });
+      const rReadFail = runMain(['--workspace', dir]);
+      assert.equal(rReadFail.code, 0);
+      rReadFail.runOnce();
+      rReadFail.residentLease.release();
+
+      assert.ok(rReadFail.lines.some(l => l.startsWith('STOP_DETECTED:issue-6-readfail:789')));
+      const readErrText = rReadFail.errLines.join('\n');
+      assert.ok(readErrText.includes('issue-6-readfail'), `読み取り失敗警告にワーカー名が含まれること: ${readErrText}`);
+      assert.ok(readErrText.includes('789'), `読み取り失敗警告にPIDが含まれること: ${readErrText}`);
+      assert.match(readErrText, /EISDIR|illegal operation/i, `読み取り失敗警告に理由が含まれること: ${readErrText}`);
     });
   });
 });
