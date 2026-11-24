@@ -194,3 +194,91 @@ test('workerProjection: 許容差を超えて開始時刻が違う停止は対�
   assert.equal(workers[0].running, true);
   assert.equal(workers[0].elapsedSeconds, 600);
 });
+
+// ── Issue #815: 既定の stderr 警告と成功・ENOENT 時の無出力 ──────────────────
+
+function captureStderr(fn) {
+  const chunks = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, encoding, cb) => {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+    if (typeof encoding === 'function') encoding();
+    else if (typeof cb === 'function') cb();
+    return true;
+  };
+  try {
+    const result = fn();
+    return { result, stderr: chunks.join('') };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
+test('recordCycleEvent: warnFn未指定の失敗時はstderrにIssue番号・イベント種別・理由を出し、成功時は何も出さない', () => {
+  const workspace = tempWorkspace();
+  try {
+    // 成功時は stderr に何も出さない
+    const okRun = captureStderr(() => metrics.recordCycleEvent(workspace, 815, 'issue-created', {
+      at: '2026-11-24T00:00:00.000Z',
+    }));
+    assert.equal(okRun.result.ok, true);
+    assert.equal(okRun.stderr, '');
+
+    // metricsPath をディレクトリにして実 fs 書き込み失敗（EISDIR）を発生させる
+    const dirIssue = 816;
+    fs.mkdirSync(metrics.metricsPath(workspace, dirIssue), { recursive: true });
+    const failRun = captureStderr(() => metrics.recordCycleEvent(workspace, dirIssue, 'plan-reported'));
+    assert.equal(failRun.result.ok, false);
+    assert.match(failRun.stderr, /816/);
+    assert.match(failRun.stderr, /plan-reported/);
+    assert.match(failRun.stderr, /EISDIR|illegal operation/i);
+
+    // warnFn を明示した場合は warnFn のみを呼び stderr には出さない
+    const warned = [];
+    const customRun = captureStderr(() => metrics.recordCycleEvent(workspace, dirIssue, 'pr-created', {}, {
+      warnFn: (err) => warned.push(err),
+    }));
+    assert.equal(customRun.result.ok, false);
+    assert.equal(customRun.stderr, '');
+    assert.equal(warned.length, 1);
+    assert.match(warned[0].message, /EISDIR|illegal operation/i);
+  } finally {
+    cleanup(workspace);
+  }
+});
+
+test('readCycleEvents: onError未指定時はENOENT以外の読み取り失敗をstderrに出し、ENOENTと成功時は無出力にする', () => {
+  const workspace = tempWorkspace();
+  try {
+    // 正常な不在（ENOENT）は stderr に出さない
+    const missingRun = captureStderr(() => metrics.readCycleEvents(workspace, 815));
+    assert.deepEqual(missingRun.result, []);
+    assert.equal(missingRun.stderr, '');
+
+    // 正常な読み取りも stderr に出さない
+    metrics.recordCycleEvent(workspace, 815, 'issue-created', { at: '2026-11-24T00:00:00.000Z' });
+    const okRun = captureStderr(() => metrics.readCycleEvents(workspace, 815));
+    assert.equal(okRun.result.length, 1);
+    assert.equal(okRun.stderr, '');
+
+    // 非 ENOENT（EISDIR）で onError 未指定時は stderr に対象 Issue と理由を出す
+    const dirIssue = 816;
+    fs.mkdirSync(metrics.metricsPath(workspace, dirIssue), { recursive: true });
+    const failRun = captureStderr(() => metrics.readCycleEvents(workspace, dirIssue));
+    assert.deepEqual(failRun.result, []);
+    assert.match(failRun.stderr, /816/);
+    assert.match(failRun.stderr, /EISDIR|illegal operation/i);
+
+    // onError 指定時は onError のみを呼び stderr には出さない
+    const errors = [];
+    const customRun = captureStderr(() => metrics.readCycleEvents(workspace, dirIssue, {
+      onError: (err) => errors.push(err),
+    }));
+    assert.deepEqual(customRun.result, []);
+    assert.equal(customRun.stderr, '');
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /EISDIR|illegal operation/i);
+  } finally {
+    cleanup(workspace);
+  }
+});

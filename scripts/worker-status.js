@@ -888,7 +888,21 @@ function collectWorkerStatusSnapshot(workspace, issue, opts = {}) {
   const eventIssues = selectedIssue
     ? [selectedIssue]
     : [...new Set(currentWorkers.map(worker => worker.issue).filter(value => value != null).map(String))];
-  const events = opts.cycleEvents || eventIssues.flatMap(issueNumber => _readCycleEvents(workspace, issueNumber));
+  const cycleMetricsErrors = [];
+  const recordReadError = (issueNumber, error) => {
+    const message = error && error.message ? error.message : String(error);
+    cycleMetricsErrors.push({ issue: issueNumber, error, message });
+  };
+  const events = opts.cycleEvents || eventIssues.flatMap((issueNumber) => {
+    try {
+      return _readCycleEvents(workspace, issueNumber, {
+        onError: (error) => recordReadError(issueNumber, error),
+      });
+    } catch (error) {
+      recordReadError(issueNumber, error);
+      return [];
+    }
+  });
   const projected = projectCycleMetrics(events, {
     issue: selectedIssue,
     now: opts.now == null ? _now() : opts.now,
@@ -905,16 +919,20 @@ function collectWorkerStatusSnapshot(workspace, issue, opts = {}) {
     projected,
     issue: selectedIssue || inferIssue(scopedCurrent),
     currentWorkers: scopedCurrent,
+    cycleMetricsErrors,
   };
 }
 
 function renderSnapshotLines(workspace, issue, opts = {}) {
   const snapshot = opts.snapshot || collectWorkerStatusSnapshot(workspace, issue, opts);
-  const { workers, projected, issue: selectedIssue, currentWorkers } = snapshot;
+  const { workers, projected, issue: selectedIssue, currentWorkers, cycleMetricsErrors = [] } = snapshot;
   const repo = opts.repo !== undefined ? opts.repo : _getRepo(workspace, opts);
   const pr = projected.pr ?? currentWorkers.find(w => w.pr != null)?.pr ?? null;
   const header = buildStatusHeader(repo, selectedIssue, pr);
-  return [header, ...renderWorkerRows(workers, opts)];
+  const errorLines = cycleMetricsErrors.map(item => (
+    `⚠ cycle-metrics unavailable (issue#${item.issue}): ${item.message}`
+  ));
+  return [header, ...renderWorkerRows(workers, opts), ...errorLines];
 }
 
 const MIN_INTERVAL_SEC = 1;
@@ -1063,7 +1081,13 @@ function main(argv = process.argv.slice(2)) {
       return { code: 1, lines: out, errLines: err };
     }
 
+    const metricsErrors = Array.isArray(snapshot.cycleMetricsErrors) ? snapshot.cycleMetricsErrors : [];
+    for (const item of metricsErrors) {
+      writeErr(`worker-status: cycle-metrics の読み取りに失敗しました (issue=${item.issue}): ${item.message}`);
+    }
+
     if (values['--json']) {
+      const errorIssues = new Set(metricsErrors.map(item => String(item.issue)));
       const jsonEntries = snapshot.workers.map(w => {
         // 稼働中ワーカーの elapsedSeconds は、過去回に停止記録の欠損がある場合でも
         // 現在の回の startTime からの経過秒数を返す（不明時のみ 0）。
@@ -1094,6 +1118,10 @@ function main(argv = process.argv.slice(2)) {
           }));
         }
         if (w.jobsError) entry.jobsError = true;
+        const workerIssue = w.issue != null ? String(w.issue) : issueArg;
+        if (workerIssue != null && errorIssues.has(String(workerIssue))) {
+          entry.cycleMetricsError = true;
+        }
         return entry;
       });
       writeOut(JSON.stringify(jsonEntries, null, 2));
