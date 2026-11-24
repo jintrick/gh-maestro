@@ -19,6 +19,7 @@ const {
   establishOrchestratorBaseline,
   parseWorkerArgs,
   ensureStatusPaneForWorkspace,
+  inspectLocalBranchForWorktreeRetry,
   _setEnsureStatusPane,
 } = require(SCRIPT);
 const readStateLib = require('../scripts/shared/read-state');
@@ -832,4 +833,194 @@ test('activateLaunchedWorkerLease: 子の endpoint が確立していれば leas
     assert.equal(entry.phase, 'active');
     assert.equal(entry.resourceKey, resourceKeyFor({ workspace: store.workspace, kind: 'worker', name: workerName }));
   });
+});
+
+// ── inspectLocalBranchForWorktreeRetry（Issue #811: 未マージローカルブランチ保護） ──
+
+const SHA_BRANCH = '1111111111111111111111111111111111111111';
+const SHA_BASE = '2222222222222222222222222222222222222222';
+
+test('inspectLocalBranchForWorktreeRetry: 同名ローカルブランチが無ければ absent を返し、以降のgitを呼ばない', () => {
+  const calls = [];
+  const spawnSyncFn = (cmd, args) => {
+    calls.push([cmd, args]);
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  const result = inspectLocalBranchForWorktreeRetry({
+    workspace: '/tmp/ws',
+    branchName: 'issue-811-coder-absent',
+    baseBranch: 'dev',
+    spawnSyncFn,
+  });
+  assert.deepEqual(result, { status: 'absent' });
+  assert.deepEqual(calls, [
+    ['git', ['for-each-ref', '--format=%(refname) %(objectname)', '--', 'refs/heads/issue-811-coder-absent']],
+  ]);
+});
+
+test('inspectLocalBranchForWorktreeRetry: サブブランチのみ存在して完全一致が無ければ absent を返す', () => {
+  const calls = [];
+  const spawnSyncFn = (cmd, args) => {
+    calls.push([cmd, args]);
+    return { status: 0, stdout: `refs/heads/issue-811-coder-prefix/sub ${SHA_BRANCH}\n`, stderr: '' };
+  };
+  const result = inspectLocalBranchForWorktreeRetry({
+    workspace: '/tmp/ws',
+    branchName: 'issue-811-coder-prefix',
+    baseBranch: 'dev',
+    spawnSyncFn,
+  });
+  assert.deepEqual(result, { status: 'absent' });
+  assert.equal(calls.length, 1);
+});
+
+test('inspectLocalBranchForWorktreeRetry: --base-branch に含まれないコミットが0件なら clean を返し、期待した argv を使う', () => {
+  const calls = [];
+  const spawnSyncFn = (cmd, args) => {
+    calls.push([cmd, args]);
+    if (args[0] === 'for-each-ref') {
+      return { status: 0, stdout: `refs/heads/issue-811-coder-clean ${SHA_BRANCH}\n`, stderr: '' };
+    }
+    if (args[0] === 'rev-parse') {
+      return { status: 0, stdout: `${SHA_BASE}\n`, stderr: '' };
+    }
+    if (args[0] === 'rev-list') {
+      return { status: 0, stdout: '0\n', stderr: '' };
+    }
+    throw new Error(`unexpected git args: ${args.join(' ')}`);
+  };
+  const result = inspectLocalBranchForWorktreeRetry({
+    workspace: '/tmp/ws',
+    branchName: 'issue-811-coder-clean',
+    baseBranch: 'dev',
+    spawnSyncFn,
+  });
+  assert.deepEqual(result, {
+    status: 'clean',
+    baseRef: 'refs/remotes/origin/dev',
+    aheadCount: 0,
+  });
+  assert.deepEqual(calls, [
+    ['git', ['for-each-ref', '--format=%(refname) %(objectname)', '--', 'refs/heads/issue-811-coder-clean']],
+    ['git', ['rev-parse', '--verify', '--end-of-options', 'refs/remotes/origin/dev^{commit}']],
+    ['git', ['rev-list', '--count', '--end-of-options', 'refs/heads/issue-811-coder-clean', `^${SHA_BASE}`]],
+  ]);
+});
+
+test('inspectLocalBranchForWorktreeRetry: --base-branch 未指定時は HEAD を基準にして0件なら clean を返す', () => {
+  const calls = [];
+  const spawnSyncFn = (cmd, args) => {
+    calls.push([cmd, args]);
+    if (args[0] === 'for-each-ref') {
+      return { status: 0, stdout: `refs/heads/issue-811-coder-head ${SHA_BRANCH}\n`, stderr: '' };
+    }
+    if (args[0] === 'rev-parse') {
+      return { status: 0, stdout: `${SHA_BASE}\n`, stderr: '' };
+    }
+    return { status: 0, stdout: '0\n', stderr: '' };
+  };
+  const result = inspectLocalBranchForWorktreeRetry({
+    workspace: '/tmp/ws',
+    branchName: 'issue-811-coder-head',
+    baseBranch: null,
+    spawnSyncFn,
+  });
+  assert.deepEqual(result, { status: 'clean', baseRef: 'HEAD', aheadCount: 0 });
+  assert.deepEqual(calls[1], ['git', ['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}']]);
+});
+
+test('inspectLocalBranchForWorktreeRetry: ベースに含まれないコミットが1件以上あれば has_unmerged_commits を返す', () => {
+  const spawnSyncFn = (_cmd, args) => {
+    if (args[0] === 'for-each-ref') {
+      return { status: 0, stdout: `refs/heads/issue-811-coder-dirty ${SHA_BRANCH}\n`, stderr: '' };
+    }
+    if (args[0] === 'rev-parse') {
+      return { status: 0, stdout: `${SHA_BASE}\n`, stderr: '' };
+    }
+    return { status: 0, stdout: '3\n', stderr: '' };
+  };
+  const result = inspectLocalBranchForWorktreeRetry({
+    workspace: '/tmp/ws',
+    branchName: 'issue-811-coder-dirty',
+    baseBranch: 'dev',
+    spawnSyncFn,
+  });
+  assert.deepEqual(result, {
+    status: 'has_unmerged_commits',
+    baseRef: 'refs/remotes/origin/dev',
+    aheadCount: 3,
+  });
+});
+
+test('inspectLocalBranchForWorktreeRetry: 判定できない各失敗種別はすべて unknown（フェイルクローズ）になる', () => {
+  const cases = [
+    {
+      name: 'for-each-ref が spawn error',
+      fn: () => ({ error: new Error('ENOENT'), status: null }),
+    },
+    {
+      name: 'for-each-ref が非ゼロ終了',
+      fn: () => ({ status: 128, stdout: '', stderr: 'fatal: not a git repository' }),
+    },
+    {
+      name: 'for-each-ref の出力行がスペース区切りでない',
+      fn: () => ({ status: 0, stdout: 'malformed-line\n', stderr: '' }),
+    },
+    {
+      name: 'for-each-ref の objectname が SHA でない',
+      fn: () => ({ status: 0, stdout: 'refs/heads/issue-811-coder-bad not-a-sha\n', stderr: '' }),
+    },
+    {
+      name: 'rev-parse が spawn error',
+      fn: (_cmd, args) => args[0] === 'for-each-ref'
+        ? { status: 0, stdout: `refs/heads/issue-811-coder-bad ${SHA_BRANCH}\n`, stderr: '' }
+        : { error: new Error('EIO'), status: null },
+    },
+    {
+      name: 'rev-parse が非ゼロ終了（origin/<baseBranch> 不在等）',
+      fn: (_cmd, args) => args[0] === 'for-each-ref'
+        ? { status: 0, stdout: `refs/heads/issue-811-coder-bad ${SHA_BRANCH}\n`, stderr: '' }
+        : { status: 128, stdout: '', stderr: 'fatal: Needed a single revision' },
+    },
+    {
+      name: 'rev-parse が SHA でない値を返す',
+      fn: (_cmd, args) => args[0] === 'for-each-ref'
+        ? { status: 0, stdout: `refs/heads/issue-811-coder-bad ${SHA_BRANCH}\n`, stderr: '' }
+        : { status: 0, stdout: 'not-a-sha\n', stderr: '' },
+    },
+    {
+      name: 'rev-list が spawn error',
+      fn: (_cmd, args) => {
+        if (args[0] === 'for-each-ref') return { status: 0, stdout: `refs/heads/issue-811-coder-bad ${SHA_BRANCH}\n`, stderr: '' };
+        if (args[0] === 'rev-parse') return { status: 0, stdout: `${SHA_BASE}\n`, stderr: '' };
+        return { error: new Error('ETIMEDOUT'), status: null };
+      },
+    },
+    {
+      name: 'rev-list が非ゼロ終了',
+      fn: (_cmd, args) => {
+        if (args[0] === 'for-each-ref') return { status: 0, stdout: `refs/heads/issue-811-coder-bad ${SHA_BRANCH}\n`, stderr: '' };
+        if (args[0] === 'rev-parse') return { status: 0, stdout: `${SHA_BASE}\n`, stderr: '' };
+        return { status: 128, stdout: '', stderr: 'fatal: bad revision' };
+      },
+    },
+    {
+      name: 'rev-list が非整数を返す',
+      fn: (_cmd, args) => {
+        if (args[0] === 'for-each-ref') return { status: 0, stdout: `refs/heads/issue-811-coder-bad ${SHA_BRANCH}\n`, stderr: '' };
+        if (args[0] === 'rev-parse') return { status: 0, stdout: `${SHA_BASE}\n`, stderr: '' };
+        return { status: 0, stdout: 'NaN\n', stderr: '' };
+      },
+    },
+  ];
+
+  for (const tc of cases) {
+    const result = inspectLocalBranchForWorktreeRetry({
+      workspace: '/tmp/ws',
+      branchName: 'issue-811-coder-bad',
+      baseBranch: 'dev',
+      spawnSyncFn: tc.fn,
+    });
+    assert.equal(result.status, 'unknown', `${tc.name} は unknown になること`);
+  }
 });
