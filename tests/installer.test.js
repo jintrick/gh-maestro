@@ -364,8 +364,6 @@ test('applySubstitutions: 未定義キーは残らない（全置換されるこ
   assert.ok(!result.includes('{{'), `未置換のプレースホルダーが残っている: ${result}`);
 });
 
-});
-
 test('expandHome: ~ をホームディレクトリに展開する', () => {
   const home = process.env.HOME || process.env.USERPROFILE;
   const result = expandHome('~/foo/bar');
